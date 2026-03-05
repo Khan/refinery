@@ -1901,6 +1901,220 @@ func TestWorkerHealthReporting(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond, "InMemCollector should be healthy again after worker resumes")
 }
 
+// customCountConf returns a base MockConfig suitable for custom span count tests.
+func customCountConf(counters []config.SpanCounterConfig) *config.MockConfig {
+	return &config.MockConfig{
+		GetTracesConfigVal: config.TracesConfig{
+			SendTicker:   config.Duration(2 * time.Millisecond),
+			SendDelay:    config.Duration(1 * time.Millisecond),
+			TraceTimeout: config.Duration(60 * time.Second),
+			MaxBatchSize: 500,
+		},
+		SampleCache: config.SampleCacheConfig{
+			KeptSize:          100,
+			DroppedSize:       100,
+			SizeCheckInterval: config.Duration(1 * time.Second),
+		},
+		GetSamplerTypeVal:  &config.DeterministicSamplerConfig{SampleRate: 1},
+		TraceIdFieldNames:  []string{"trace.trace_id", "traceId"},
+		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
+		GetCollectionConfigVal: config.CollectionConfig{
+			WorkerCount:       2,
+			ShutdownDelay:     config.Duration(1 * time.Millisecond),
+			IncomingQueueSize: 10,
+			PeerQueueSize:     10,
+		},
+		SpanCounterConfigs: counters,
+	}
+}
+
+// TestCustomSpanCounts_NoCounters verifies that when no counters are configured
+// no custom fields are added to any span.
+func TestCustomSpanCounts_NoCounters(t *testing.T) {
+	coll := newTestCollector(t, customCountConf(nil))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "no-counters"
+	coll.AddSpanFromPeer(&types.Span{
+		TraceID: traceID,
+		Event: &types.Event{
+			Dataset: "test",
+			Data:    types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x"}),
+			APIKey:  legacyAPIKey,
+		},
+	})
+	coll.AddSpan(&types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event:   &types.Event{Dataset: "test", Data: types.NewPayload(coll.Config, nil), APIKey: legacyAPIKey},
+	})
+
+	events := transmission.GetBlock(2)
+	for _, ev := range events {
+		assert.Nil(t, ev.Data.Get("my.count"), "no custom count fields should be set when no counters are configured")
+	}
+}
+
+// TestCustomSpanCounts_CountsLandOnRoot verifies that a counter with no
+// conditions counts all spans and attaches the result to the root span only.
+func TestCustomSpanCounts_CountsLandOnRoot(t *testing.T) {
+	counters := []config.SpanCounterConfig{
+		{Key: "all_spans"},
+	}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "root-target"
+	for i := 0; i < 3; i++ {
+		coll.AddSpanFromPeer(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "test",
+				Data:    types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x"}),
+				APIKey:  legacyAPIKey,
+			},
+		})
+	}
+	coll.AddSpan(&types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event:   &types.Event{Dataset: "test", Data: types.NewPayload(coll.Config, nil), APIKey: legacyAPIKey},
+	})
+
+	events := transmission.GetBlock(4)
+	require.Equal(t, 4, len(events))
+
+	var rootEvent *types.Event
+	var childEvents []*types.Event
+	for _, ev := range events {
+		if ev.Data.Get("trace.parent_id") == nil {
+			rootEvent = ev
+		} else {
+			childEvents = append(childEvents, ev)
+		}
+	}
+
+	require.NotNil(t, rootEvent)
+	// all 4 spans counted (3 children + root)
+	assert.Equal(t, int64(4), rootEvent.Data.Get("all_spans"))
+	for _, child := range childEvents {
+		assert.Nil(t, child.Data.Get("all_spans"), "custom count should not be set on child spans")
+	}
+}
+
+// TestCustomSpanCounts_ConditionalCounting verifies that only spans matching
+// a condition are counted.
+func TestCustomSpanCounts_ConditionalCounting(t *testing.T) {
+	counters := []config.SpanCounterConfig{
+		{
+			Key: "error_spans",
+			Conditions: []*config.RulesBasedSamplerCondition{
+				{Field: "error", Operator: config.EQ, Value: true},
+			},
+		},
+	}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "conditional"
+	// 2 error spans
+	for i := 0; i < 2; i++ {
+		coll.AddSpanFromPeer(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "test",
+				Data:    types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x", "error": true}),
+				APIKey:  legacyAPIKey,
+			},
+		})
+	}
+	// 2 non-error spans
+	for i := 0; i < 2; i++ {
+		coll.AddSpanFromPeer(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "test",
+				Data:    types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x"}),
+				APIKey:  legacyAPIKey,
+			},
+		})
+	}
+	coll.AddSpan(&types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event:   &types.Event{Dataset: "test", Data: types.NewPayload(coll.Config, nil), APIKey: legacyAPIKey},
+	})
+
+	events := transmission.GetBlock(5)
+	require.Equal(t, 5, len(events))
+
+	var rootEvent *types.Event
+	for _, ev := range events {
+		if ev.Data.Get("trace.parent_id") == nil {
+			rootEvent = ev
+		}
+	}
+	require.NotNil(t, rootEvent)
+	assert.Equal(t, int64(2), rootEvent.Data.Get("error_spans"))
+}
+
+// TestCustomSpanCounts_MultipleCounters verifies that multiple counters with
+// different conditions produce independent counts on the root span.
+func TestCustomSpanCounts_MultipleCounters(t *testing.T) {
+	counters := []config.SpanCounterConfig{
+		{
+			Key: "db_spans",
+			Conditions: []*config.RulesBasedSamplerCondition{
+				{Field: "db.system", Operator: config.Exists},
+			},
+		},
+		{
+			Key: "error_spans",
+			Conditions: []*config.RulesBasedSamplerCondition{
+				{Field: "error", Operator: config.EQ, Value: true},
+			},
+		},
+	}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "multi-counter"
+	spans := []map[string]interface{}{
+		{"trace.parent_id": "x", "db.system": "postgresql"},
+		{"trace.parent_id": "x", "db.system": "postgresql", "error": true},
+		{"trace.parent_id": "x", "error": true},
+		{"trace.parent_id": "x"},
+	}
+	for _, data := range spans {
+		coll.AddSpanFromPeer(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "test",
+				Data:    types.NewPayload(coll.Config, data),
+				APIKey:  legacyAPIKey,
+			},
+		})
+	}
+	coll.AddSpan(&types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event:   &types.Event{Dataset: "test", Data: types.NewPayload(coll.Config, nil), APIKey: legacyAPIKey},
+	})
+
+	events := transmission.GetBlock(5)
+	require.Equal(t, 5, len(events))
+
+	var rootEvent *types.Event
+	for _, ev := range events {
+		if ev.Data.Get("trace.parent_id") == nil {
+			rootEvent = ev
+		}
+	}
+	require.NotNil(t, rootEvent)
+	assert.Equal(t, int64(2), rootEvent.Data.Get("db_spans"), "2 spans have db.system")
+	assert.Equal(t, int64(2), rootEvent.Data.Get("error_spans"), "2 spans have error=true")
+}
+
 // BenchmarkCollectorWithSamplers runs benchmarks for different sampler configurations.
 // This is a tricky benchmark to interpret because just setting up the input data
 // can easily be more expensive than the collector's routing code. The goal is to

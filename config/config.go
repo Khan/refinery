@@ -151,6 +151,8 @@ type Config interface {
 
 	GetAddCountsToRoot() bool
 
+	GetSpanCounterConfig() []SpanCounterConfig
+
 	GetConfigMetadata() []ConfigMetadata
 
 	GetSampleCacheConfig() SampleCacheConfig

@@ -113,7 +113,8 @@ type InMemCollector struct {
 
 	hostname string
 
-	memMetricSample []rtmetrics.Sample // Memory monitoring using runtime/metrics
+	memMetricSample    []rtmetrics.Sample // Memory monitoring using runtime/metrics
+	spanCounterConfigs []config.SpanCounterConfig
 }
 
 // These are the names of the metrics we use to track the number of events sent to peers through the router.
@@ -171,6 +172,7 @@ func (i *InMemCollector) Start() error {
 	i.Logger.Info().WithField("num_workers", numWorkers).Logf("Starting InMemCollector with %d workers", numWorkers)
 
 	i.StressRelief.UpdateFromConfig()
+	i.initSpanCounterConfigs()
 	// Set queue capacity metrics for stress relief calculations
 	i.Metrics.Store(DENOMINATOR_INCOMING_CAP, float64(imcConfig.IncomingQueueSize))
 	i.Metrics.Store(DENOMINATOR_PEER_CAP, float64(imcConfig.PeerQueueSize))
@@ -240,6 +242,7 @@ func (i *InMemCollector) reloadConfigs() {
 	i.SamplerFactory.ClearDynsamplers()
 
 	i.StressRelief.UpdateFromConfig()
+	i.initSpanCounterConfigs()
 
 	// Send reload signals to all workers to clear their local samplers
 	// so that the new configuration will be propagated
@@ -691,12 +694,68 @@ func (i *InMemCollector) addAdditionalAttributes(sp *types.Span) {
 	}
 }
 
+// initSpanCounterConfigs loads and initializes span counter configs from the current config.
+// Must be called at startup and on config reload.
+func (i *InMemCollector) initSpanCounterConfigs() {
+	cfgs := i.Config.GetSpanCounterConfig()
+	for j := range cfgs {
+		if err := cfgs[j].Init(); err != nil {
+			i.Logger.Error().WithField("error", err).Logf("failed to initialize span counter config entry %q", cfgs[j].Key)
+		}
+	}
+	i.mutex.Lock()
+	i.spanCounterConfigs = cfgs
+	i.mutex.Unlock()
+}
+
+// computeCustomCounts computes each counter's value by iterating all spans in the trace
+// and attaches the results to the root span.
+// Returns nil, nil if there are no counters configured or no root span.
+//
+// Stress relief note: this runs inside sendTraces(), the sole consumer of the
+// tracesToSend channel. Work is O(N×M) — N spans × M counters — so large
+// traces with many counters slow the consumer, which deepens the outgoing
+// queue. The stress relief system monitors queue depth as one of its stress
+// inputs, so heavy custom-count configurations can raise the measured stress
+// level and trigger earlier activation of stress relief. Additionally, spans
+// processed via ProcessSpanImmediately (the stress-relief fast path) bypass the
+// trace buffer entirely and never reach sendTraces, so custom counts are not
+// computed or attached to stress-sampled traces.
+func (i *InMemCollector) computeCustomCounts(t sendableTrace) (*types.Span, map[string]int64) {
+	i.mutex.RLock()
+	counters := i.spanCounterConfigs
+	i.mutex.RUnlock()
+
+	if len(counters) == 0 {
+		return nil, nil
+	}
+
+	targetSpan := t.RootSpan
+	if targetSpan == nil {
+		return nil, nil
+	}
+
+	var rootData config.SpanData = &targetSpan.Data
+	counts := make(map[string]int64, len(counters))
+	for _, sp := range t.GetSpans() {
+		for _, counter := range counters {
+			if counter.MatchesSpan(&sp.Data, rootData) {
+				counts[counter.Key]++
+			}
+		}
+	}
+
+	return targetSpan, counts
+}
+
 func (i *InMemCollector) sendTraces() {
 	defer i.sendTracesWG.Done()
 
 	for t := range i.tracesToSend {
 		i.Metrics.Histogram("collector_outgoing_queue", float64(len(i.tracesToSend)))
 		_, span := otelutil.StartSpanMulti(context.Background(), i.Tracer, "sendTrace", map[string]interface{}{"num_spans": t.DescendantCount(), "tracesToSend_size": len(i.tracesToSend)})
+
+		customCountTarget, customCounts := i.computeCustomCounts(t)
 
 		for _, sp := range t.GetSpans() {
 
@@ -718,6 +777,13 @@ func (i *InMemCollector) sendTraces() {
 					sp.Data.Set(types.MetaEventCount, int64(t.DescendantCount()))
 				} else if i.Config.GetAddSpanCountToRoot() {
 					sp.Data.Set(types.MetaSpanCount, int64(t.DescendantCount()))
+				}
+			}
+
+			// set custom span counts on the target span (root if present, else best fallback)
+			if sp == customCountTarget {
+				for k, v := range customCounts {
+					sp.Data.Set(k, v)
 				}
 			}
 
