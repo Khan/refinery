@@ -708,9 +708,25 @@ func (i *InMemCollector) initSpanCounterConfigs() {
 	i.mutex.Unlock()
 }
 
+// findSuitableRootSpan returns the root span of the trace if one is present.
+// If no root span has been identified, it falls back to the first non-annotation
+// span (i.e. not a span event or link). Returns nil if no suitable span exists.
+func findSuitableRootSpan(t sendableTrace) *types.Span {
+	if t.RootSpan != nil {
+		return t.RootSpan
+	}
+	for _, sp := range t.GetSpans() {
+		if sp.AnnotationType() != types.SpanAnnotationTypeSpanEvent &&
+			sp.AnnotationType() != types.SpanAnnotationTypeLink {
+			return sp
+		}
+	}
+	return nil
+}
+
 // computeCustomCounts computes each counter's value by iterating all spans in the trace
 // and attaches the results to the root span.
-// Returns nil, nil if there are no counters configured or no root span.
+// Returns nil, nil if there are no counters configured or no suitable target span.
 //
 // Stress relief note: this runs inside sendTraces(), the sole consumer of the
 // tracesToSend channel. Work is O(N×M) — N spans × M counters — so large
@@ -730,7 +746,7 @@ func (i *InMemCollector) computeCustomCounts(t sendableTrace) (*types.Span, map[
 		return nil, nil
 	}
 
-	targetSpan := t.RootSpan
+	targetSpan := findSuitableRootSpan(t)
 	if targetSpan == nil {
 		return nil, nil
 	}

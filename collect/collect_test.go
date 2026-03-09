@@ -2115,6 +2115,53 @@ func TestCustomSpanCounts_MultipleCounters(t *testing.T) {
 	assert.Equal(t, int64(2), rootEvent.Data.Get("error_spans"), "2 spans have error=true")
 }
 
+// TestCustomSpanCounts_NoRootSpan verifies that when a trace times out without
+// a root span, custom counts land on the first non-annotation span instead.
+func TestCustomSpanCounts_NoRootSpan(t *testing.T) {
+	conf := customCountConf([]config.SpanCounterConfig{{Key: "all_spans"}})
+	conf.GetTracesConfigVal.TraceTimeout = config.Duration(5 * time.Millisecond)
+
+	coll := newTestCollector(t, conf)
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "no-root"
+	// annotation span: should not be the target
+	coll.AddSpanFromPeer(&types.Span{
+		TraceID: traceID,
+		Event: &types.Event{
+			Dataset: "test",
+			Data: func() types.Payload {
+				p := types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x"})
+				p.MetaAnnotationType = "span_event"
+				return p
+			}(),
+			APIKey: legacyAPIKey,
+		},
+	})
+	// regular span: should be the target
+	coll.AddSpanFromPeer(&types.Span{
+		TraceID: traceID,
+		Event: &types.Event{
+			Dataset: "test",
+			Data:    types.NewPayload(coll.Config, map[string]interface{}{"trace.parent_id": "x"}),
+			APIKey:  legacyAPIKey,
+		},
+	})
+
+	events := transmission.GetBlock(2)
+	require.Equal(t, 2, len(events))
+
+	// Exactly one span should carry the custom count (the first real span).
+	var counted []*types.Event
+	for _, ev := range events {
+		if ev.Data.Get("all_spans") != nil {
+			counted = append(counted, ev)
+		}
+	}
+	require.Equal(t, 1, len(counted), "custom count should appear on exactly one span when there is no root")
+	assert.Equal(t, int64(2), counted[0].Data.Get("all_spans"), "both spans should be counted")
+}
+
 // BenchmarkCollectorWithSamplers runs benchmarks for different sampler configurations.
 // This is a tricky benchmark to interpret because just setting up the input data
 // can easily be more expensive than the collector's routing code. The goal is to
