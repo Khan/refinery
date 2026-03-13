@@ -193,7 +193,6 @@ type RefineryTelemetryConfig struct {
 	AddSpanCountToRoot     *DefaultTrue        `yaml:"AddSpanCountToRoot" default:"true"` // Avoid pointer woe on access, use GetAddSpanCountToRoot() instead.
 	AddCountsToRoot        bool                `yaml:"AddCountsToRoot"`
 	AddHostMetadataToTrace *DefaultTrue        `yaml:"AddHostMetadataToTrace" default:"true"` // Avoid pointer woe on access, use GetAddHostMetadataToTrace() instead.
-	CustomSpanCounts       []SpanCounterConfig `yaml:"CustomSpanCounts,omitempty"`
 }
 
 type TracesConfig struct {
@@ -1117,11 +1116,11 @@ func (f *fileConfig) GetAddCountsToRoot() bool {
 	return f.mainConfig.Telemetry.AddCountsToRoot
 }
 
-func (f *fileConfig) GetSpanCounterConfig() []SpanCounterConfig {
+func (f *fileConfig) GetSpanCounters() []SpanCounter {
 	f.mux.RLock()
 	defer f.mux.RUnlock()
 
-	return f.mainConfig.Telemetry.CustomSpanCounts
+	return f.rulesConfig.SpanCounters
 }
 
 func (f *fileConfig) GetSampleCacheConfig() SampleCacheConfig {

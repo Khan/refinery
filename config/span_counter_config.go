@@ -2,22 +2,22 @@ package config
 
 import "strings"
 
-// SpanData is the interface required for matching span fields in a SpanCounterConfig.
+// SpanData is the interface required for matching span fields in a SpanCounter.
 // It is satisfied by *types.Payload.
 type SpanData interface {
 	Get(key string) any
 	Exists(key string) bool
 }
 
-// SpanCounterConfig defines a custom span count to be computed and added to
+// SpanCounter defines a custom span count to be computed and added to
 // the root span under Key. Spans are counted if they satisfy all Conditions.
-type SpanCounterConfig struct {
+type SpanCounter struct {
 	Key        string                        `yaml:"Key"`
 	Conditions []*RulesBasedSamplerCondition `yaml:"Conditions,omitempty"`
 }
 
 // Init initializes all conditions. Must be called before MatchesSpan.
-func (c *SpanCounterConfig) Init() error {
+func (c *SpanCounter) Init() error {
 	for _, cond := range c.Conditions {
 		if err := cond.Init(); err != nil {
 			return err
@@ -28,7 +28,7 @@ func (c *SpanCounterConfig) Init() error {
 
 // MatchesSpan returns true if the span satisfies all conditions.
 // span is the span being tested; root is the root span's data (may be nil).
-func (c *SpanCounterConfig) MatchesSpan(span SpanData, root SpanData) bool {
+func (c *SpanCounter) MatchesSpan(span SpanData, root SpanData) bool {
 	for _, cond := range c.Conditions {
 		var value any
 		var exists bool

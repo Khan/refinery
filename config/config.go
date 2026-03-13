@@ -151,7 +151,7 @@ type Config interface {
 
 	GetAddCountsToRoot() bool
 
-	GetSpanCounterConfig() []SpanCounterConfig
+	GetSpanCounters() []SpanCounter
 
 	GetConfigMetadata() []ConfigMetadata
 

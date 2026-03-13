@@ -1902,7 +1902,7 @@ func TestWorkerHealthReporting(t *testing.T) {
 }
 
 // customCountConf returns a base MockConfig suitable for custom span count tests.
-func customCountConf(counters []config.SpanCounterConfig) *config.MockConfig {
+func customCountConf(counters []config.SpanCounter) *config.MockConfig {
 	return &config.MockConfig{
 		GetTracesConfigVal: config.TracesConfig{
 			SendTicker:   config.Duration(2 * time.Millisecond),
@@ -1924,7 +1924,7 @@ func customCountConf(counters []config.SpanCounterConfig) *config.MockConfig {
 			IncomingQueueSize: 10,
 			PeerQueueSize:     10,
 		},
-		SpanCounterConfigs: counters,
+		SpanCounters: counters,
 	}
 }
 
@@ -1958,7 +1958,7 @@ func TestCustomSpanCounts_NoCounters(t *testing.T) {
 // TestCustomSpanCounts_CountsLandOnRoot verifies that a counter with no
 // conditions counts all spans and attaches the result to the root span only.
 func TestCustomSpanCounts_CountsLandOnRoot(t *testing.T) {
-	counters := []config.SpanCounterConfig{
+	counters := []config.SpanCounter{
 		{Key: "all_spans"},
 	}
 	coll := newTestCollector(t, customCountConf(counters))
@@ -2005,7 +2005,7 @@ func TestCustomSpanCounts_CountsLandOnRoot(t *testing.T) {
 // TestCustomSpanCounts_ConditionalCounting verifies that only spans matching
 // a condition are counted.
 func TestCustomSpanCounts_ConditionalCounting(t *testing.T) {
-	counters := []config.SpanCounterConfig{
+	counters := []config.SpanCounter{
 		{
 			Key: "error_spans",
 			Conditions: []*config.RulesBasedSamplerCondition{
@@ -2061,7 +2061,7 @@ func TestCustomSpanCounts_ConditionalCounting(t *testing.T) {
 // TestCustomSpanCounts_MultipleCounters verifies that multiple counters with
 // different conditions produce independent counts on the root span.
 func TestCustomSpanCounts_MultipleCounters(t *testing.T) {
-	counters := []config.SpanCounterConfig{
+	counters := []config.SpanCounter{
 		{
 			Key: "db_spans",
 			Conditions: []*config.RulesBasedSamplerCondition{
@@ -2118,7 +2118,7 @@ func TestCustomSpanCounts_MultipleCounters(t *testing.T) {
 // TestCustomSpanCounts_NoRootSpan verifies that when a trace times out without
 // a root span, custom counts land on the first non-annotation span instead.
 func TestCustomSpanCounts_NoRootSpan(t *testing.T) {
-	conf := customCountConf([]config.SpanCounterConfig{{Key: "all_spans"}})
+	conf := customCountConf([]config.SpanCounter{{Key: "all_spans"}})
 	conf.GetTracesConfigVal.TraceTimeout = config.Duration(5 * time.Millisecond)
 
 	coll := newTestCollector(t, conf)

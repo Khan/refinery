@@ -671,3 +671,27 @@ If your traces are consistent lengths and changes in trace length is a useful in
 
 - Type: `bool`
 
+## Custom Span Count Configuration
+
+Defines a single custom span counter.
+Each counter has a Key that names the field written to the root span, and an optional list of Conditions that must all match for a span to be counted.
+Spans are counted when all of the entry's Conditions match.
+If Conditions is empty, every span in the trace is counted.
+The counter value is written to the root span under the key specified by `Key`.
+If no root span exists when the trace is sent, the counter is written to the first non-annotation span instead.
+
+### `Key`
+
+The name of the field that will be added to the root span.
+Must not be empty.
+
+- Type: `string`
+
+### `Conditions`
+
+All conditions must match for a span to be counted.
+If empty, every span in the trace is counted.
+Uses the same condition format as rules-based sampler conditions.
+
+- Type: `objectarray`
+

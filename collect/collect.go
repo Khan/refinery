@@ -114,7 +114,7 @@ type InMemCollector struct {
 	hostname string
 
 	memMetricSample    []rtmetrics.Sample // Memory monitoring using runtime/metrics
-	spanCounterConfigs []config.SpanCounterConfig
+	spanCounters []config.SpanCounter
 }
 
 // These are the names of the metrics we use to track the number of events sent to peers through the router.
@@ -172,7 +172,7 @@ func (i *InMemCollector) Start() error {
 	i.Logger.Info().WithField("num_workers", numWorkers).Logf("Starting InMemCollector with %d workers", numWorkers)
 
 	i.StressRelief.UpdateFromConfig()
-	i.initSpanCounterConfigs()
+	i.initSpanCounters()
 	// Set queue capacity metrics for stress relief calculations
 	i.Metrics.Store(DENOMINATOR_INCOMING_CAP, float64(imcConfig.IncomingQueueSize))
 	i.Metrics.Store(DENOMINATOR_PEER_CAP, float64(imcConfig.PeerQueueSize))
@@ -242,7 +242,7 @@ func (i *InMemCollector) reloadConfigs() {
 	i.SamplerFactory.ClearDynsamplers()
 
 	i.StressRelief.UpdateFromConfig()
-	i.initSpanCounterConfigs()
+	i.initSpanCounters()
 
 	// Send reload signals to all workers to clear their local samplers
 	// so that the new configuration will be propagated
@@ -694,17 +694,17 @@ func (i *InMemCollector) addAdditionalAttributes(sp *types.Span) {
 	}
 }
 
-// initSpanCounterConfigs loads and initializes span counter configs from the current config.
+// initSpanCounters loads and initializes span counters from the current config.
 // Must be called at startup and on config reload.
-func (i *InMemCollector) initSpanCounterConfigs() {
-	cfgs := i.Config.GetSpanCounterConfig()
-	for j := range cfgs {
-		if err := cfgs[j].Init(); err != nil {
-			i.Logger.Error().WithField("error", err).Logf("failed to initialize span counter config entry %q", cfgs[j].Key)
+func (i *InMemCollector) initSpanCounters() {
+	counters := i.Config.GetSpanCounters()
+	for j := range counters {
+		if err := counters[j].Init(); err != nil {
+			i.Logger.Error().WithField("error", err).Logf("failed to initialize span counter %q", counters[j].Key)
 		}
 	}
 	i.mutex.Lock()
-	i.spanCounterConfigs = cfgs
+	i.spanCounters = counters
 	i.mutex.Unlock()
 }
 
@@ -739,7 +739,7 @@ func findSuitableRootSpan(t sendableTrace) *types.Span {
 // computed or attached to stress-sampled traces.
 func (i *InMemCollector) computeCustomCounts(t sendableTrace) (*types.Span, map[string]int64) {
 	i.mutex.RLock()
-	counters := i.spanCounterConfigs
+	counters := i.spanCounters
 	i.mutex.RUnlock()
 
 	if len(counters) == 0 {

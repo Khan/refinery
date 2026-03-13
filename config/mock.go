@@ -52,7 +52,7 @@ type MockConfig struct {
 	AdditionalErrorFields            []string
 	AddSpanCountToRoot               bool
 	AddCountsToRoot                  bool
-	SpanCounterConfigs               []SpanCounterConfig
+	SpanCounters                     []SpanCounter
 	CacheOverrunStrategy             string
 	SampleCache                      SampleCacheConfig
 	StressRelief                     StressReliefConfig
@@ -416,11 +416,11 @@ func (f *MockConfig) GetAddCountsToRoot() bool {
 	return f.AddSpanCountToRoot
 }
 
-func (f *MockConfig) GetSpanCounterConfig() []SpanCounterConfig {
+func (f *MockConfig) GetSpanCounters() []SpanCounter {
 	f.Mux.RLock()
 	defer f.Mux.RUnlock()
 
-	return f.SpanCounterConfigs
+	return f.SpanCounters
 }
 
 func (f *MockConfig) GetSampleCacheConfig() SampleCacheConfig {

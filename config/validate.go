@@ -653,6 +653,31 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 				}
 			}
 			hasSamplers = true
+		case "SpanCounters":
+			if arr, ok := v.([]any); !ok {
+				results = append(results, ValidationResult{
+					Message:  fmt.Sprintf("SpanCounters must be an array, but %v is %T", v, v),
+					Severity: Error,
+				})
+			} else {
+				for i, entry := range arr {
+					if entryMap, ok := entry.(map[string]any); ok {
+						rulesmap := map[string]any{"SpanCounters": entryMap}
+						subresults := m.Validate(rulesmap)
+						for _, result := range subresults {
+							results = append(results, ValidationResult{
+								Message:  fmt.Sprintf("Within SpanCounters[%d]: %s", i, result.Message),
+								Severity: result.Severity,
+							})
+						}
+					} else {
+						results = append(results, ValidationResult{
+							Message:  fmt.Sprintf("SpanCounters[%d] must be an object, but %v is %T", i, entry, entry),
+							Severity: Error,
+						})
+					}
+				}
+			}
 		default:
 			results = append(results, ValidationResult{
 				Message:  fmt.Sprintf("unknown top-level key %s", k),

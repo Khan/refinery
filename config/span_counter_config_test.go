@@ -175,18 +175,18 @@ func TestConditionMatchesValue(t *testing.T) {
 }
 
 // ----------------------------------------------------------------------------
-// SpanCounterConfig.MatchesSpan
+// SpanCounter.MatchesSpan
 // ----------------------------------------------------------------------------
 
 func TestMatchesSpan_NoConditions(t *testing.T) {
 	// A counter with no conditions matches every span.
-	counter := SpanCounterConfig{Key: "all"}
+	counter := SpanCounter{Key: "all"}
 	assert.True(t, counter.MatchesSpan(spanData{"foo": "bar"}, nil))
 	assert.True(t, counter.MatchesSpan(spanData{}, nil))
 }
 
 func TestMatchesSpan_SingleCondition(t *testing.T) {
-	counter := SpanCounterConfig{
+	counter := SpanCounter{
 		Key:        "errors",
 		Conditions: []*RulesBasedSamplerCondition{cond("error", EQ, true)},
 	}
@@ -197,7 +197,7 @@ func TestMatchesSpan_SingleCondition(t *testing.T) {
 }
 
 func TestMatchesSpan_MultipleConditionsAllMustMatch(t *testing.T) {
-	counter := SpanCounterConfig{
+	counter := SpanCounter{
 		Key: "slow-errors",
 		Conditions: []*RulesBasedSamplerCondition{
 			cond("error", EQ, true),
@@ -213,7 +213,7 @@ func TestMatchesSpan_MultipleConditionsAllMustMatch(t *testing.T) {
 
 func TestMatchesSpan_RootPrefixedField(t *testing.T) {
 	// "root.service.name" reads from the root span data, not the span itself.
-	counter := SpanCounterConfig{
+	counter := SpanCounter{
 		Key:        "svc-db",
 		Conditions: []*RulesBasedSamplerCondition{cond("root.service.name", EQ, "database")},
 	}
@@ -227,7 +227,7 @@ func TestMatchesSpan_RootPrefixedField(t *testing.T) {
 
 func TestMatchesSpan_RootPrefixedField_NilRoot(t *testing.T) {
 	// When root is nil a root-prefixed field is never found → field is absent.
-	counter := SpanCounterConfig{
+	counter := SpanCounter{
 		Key:        "svc",
 		Conditions: []*RulesBasedSamplerCondition{cond("root.service.name", EQ, "database")},
 	}
@@ -243,7 +243,7 @@ func TestMatchesSpan_MultiFieldFallback(t *testing.T) {
 	if err := c.Init(); err != nil {
 		t.Fatal(err)
 	}
-	counter := SpanCounterConfig{Key: "has-trace", Conditions: []*RulesBasedSamplerCondition{c}}
+	counter := SpanCounter{Key: "has-trace", Conditions: []*RulesBasedSamplerCondition{c}}
 
 	assert.True(t, counter.MatchesSpan(spanData{"trace.trace_id": "abc"}, nil))
 	assert.True(t, counter.MatchesSpan(spanData{"traceId": "abc"}, nil))
@@ -261,7 +261,7 @@ func TestMatchesSpan_MultiFieldFallback_FirstWins(t *testing.T) {
 	if err := c.Init(); err != nil {
 		t.Fatal(err)
 	}
-	counter := SpanCounterConfig{Key: "k", Conditions: []*RulesBasedSamplerCondition{c}}
+	counter := SpanCounter{Key: "k", Conditions: []*RulesBasedSamplerCondition{c}}
 
 	// "a" is found with wrong value; "b" has the right value but is not checked.
 	assert.False(t, counter.MatchesSpan(spanData{"a": "no", "b": "yes"}, nil))
@@ -272,7 +272,7 @@ func TestMatchesSpan_MultiFieldFallback_FirstWins(t *testing.T) {
 func TestMatchesSpan_TypedCondition(t *testing.T) {
 	// When Datatype is set, Init wires up a type-coercing Matches function.
 	// Verify that MatchesSpan delegates to it correctly.
-	counter := SpanCounterConfig{
+	counter := SpanCounter{
 		Key:        "count-int",
 		Conditions: []*RulesBasedSamplerCondition{condTyped("code", EQ, 200, "int")},
 	}
@@ -283,11 +283,11 @@ func TestMatchesSpan_TypedCondition(t *testing.T) {
 }
 
 func TestMatchesSpan_ExistsAndNotExists(t *testing.T) {
-	exists := SpanCounterConfig{
+	exists := SpanCounter{
 		Key:        "has-field",
 		Conditions: []*RulesBasedSamplerCondition{cond("db.query", Exists, nil)},
 	}
-	notExists := SpanCounterConfig{
+	notExists := SpanCounter{
 		Key:        "no-field",
 		Conditions: []*RulesBasedSamplerCondition{cond("db.query", NotExists, nil)},
 	}
