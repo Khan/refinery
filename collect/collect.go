@@ -709,19 +709,23 @@ func (i *InMemCollector) initSpanCounters() {
 }
 
 // findSuitableRootSpan returns the root span of the trace if one is present.
-// If no root span has been identified, it falls back to the first non-annotation
-// span (i.e. not a span event or link). Returns nil if no suitable span exists.
+// If no root span has been identified, it falls back to the non-annotation
+// span (i.e. not a span event or link) with the earliest timestamp, which is
+// the most likely root. Returns nil if no suitable span exists.
 func findSuitableRootSpan(t sendableTrace) *types.Span {
 	if t.RootSpan != nil {
 		return t.RootSpan
 	}
+	var best *types.Span
 	for _, sp := range t.GetSpans() {
 		if sp.AnnotationType() != types.SpanAnnotationTypeSpanEvent &&
 			sp.AnnotationType() != types.SpanAnnotationTypeLink {
-			return sp
+			if best == nil || sp.Timestamp.Before(best.Timestamp) {
+				best = sp
+			}
 		}
 	}
-	return nil
+	return best
 }
 
 // computeCustomCounts computes each counter's value by iterating all spans in the trace
