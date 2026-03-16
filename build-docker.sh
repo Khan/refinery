@@ -3,7 +3,7 @@ set -o nounset
 set -o pipefail
 set -o xtrace
 
-GCLOUD_REGISTRY="us-central1-docker.pkg.dev/khan-internal-services/refinery"
+GCLOUD_REGISTRY="gcr.io/sre-team-418623"
 
 # Parse flags
 PUSH=false
