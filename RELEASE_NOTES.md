@@ -2,6 +2,35 @@
 
 While [CHANGELOG.md](./CHANGELOG.md) contains detailed documentation and links to all the source code changes in a given release, this document is intended to be aimed at a more comprehensible version of the contents of the release from the point of view of users of Refinery.
 
+## Version 3.2.1
+
+This release fixes a bug where trace and span IDs were corrupted for clients sending data over OTLP HTTP/JSON.
+
+## Version 3.2.0
+
+This release adds new configuration options for authorization and observability.
+
+### Configuration Changes
+
+* **Added**: `AccessKeys.ReceiveKeyIDs` - authorizes incoming traffic by Honeycomb ingest key IDs (obtained from the `/1/auth` endpoint) instead of requiring full API keys. Supports live reload alongside the existing `ReceiveKeys` option.
+* **Added**: `OTelMetrics.AdditionalAttributes` - injects custom resource attributes (e.g., cluster ID, environment name) into all OTLP metrics emitted by Refinery. Supplied as comma-separated `key:value` pairs.
+
+### New Metrics
+
+* `events_dropped` - Counter tracking the number of events dropped by Refinery.
+
+### Fixes
+
+* Fixed `AdditionalErrorFields` not being included in transmission error logs.
+
+## Version 3.1.2
+
+This patch release primarily addresses security vulnerabilities in dependencies.
+
+### Maintenance
+
+- Updated dependencies to address security vulnerabilities CVE-2026-27139, CVE-2026-27142, and CVE-2026-25679.
+
 ## Version 3.1.1
 
 This patch release includes bug fixes and a new feature for configuring additional HTTP headers.
