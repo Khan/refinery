@@ -174,7 +174,7 @@ func (v *RulesBasedDownstreamSampler) NameMeaningfulRate() string {
 type V2SamplerConfig struct {
 	RulesVersion     int                         `json:"rulesversion" yaml:"RulesVersion" validate:"required,ge=2"`
 	Samplers         map[string]*V2SamplerChoice `json:"samplers" yaml:"Samplers,omitempty" validate:"required"`
-	SpanCounters []SpanCounter `json:"spancounters" yaml:"SpanCounters,omitempty"`
+	SpanCounters []SpanCounter `json:"spancounters,omitempty" yaml:"SpanCounters,omitempty" toml:",omitempty"`
 }
 
 type GetSamplingFielder interface {
