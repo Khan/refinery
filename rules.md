@@ -3,7 +3,7 @@
 # Honeycomb Refinery Rules Documentation
 
 This is the documentation for the rules configuration for Honeycomb's Refinery.
-It was automatically generated on 2026-06-01 at 18:46:18 UTC.
+It was automatically generated on 2026-06-01 at 19:01:21 UTC.
 
 ## The Rules file
 
@@ -724,7 +724,7 @@ Type: `bool`
 Defines a single custom span counter.
 Each counter has a Key that names the field written to a target span and an optional list of Conditions that must all match for a span to be counted.
 By default the trace-wide count is written to the root span under Key.
-When ScopeConditions is set, every span matching ScopeConditions instead receives the count of matching descendant spans in its own subtree, and EmitTotalOnRoot controls whether the trace-wide total is additionally written to the root.
+When ScopeConditions is set, every span matching ScopeConditions instead receives the count of matching descendant spans in its own subtree; setting RootKey alongside additionally writes the trace-wide total to the root span under RootKey.
 If no root span exists when the trace is sent, root writes go to the first non-annotation span instead.
 
 ### `Key`
@@ -739,8 +739,9 @@ Type: `string`
 
 ### `RootKey`
 
-When set together with `ScopeConditions`, the trace-wide total on the root span is written under `RootKey` instead of `Key`.
-This lets per-anchor counts and the trace-wide total land on different attribute names so they can be queried independently.
+Only meaningful when `ScopeConditions` is set.
+Setting `RootKey` opts the root span into receiving the trace-wide total, written under this field name (which is typically different from `Key` so per-anchor counts and the trace-wide total can be queried independently).
+If `RootKey` is left empty on a scoped counter the root receives no write.
 Ignored (with a validation warning) when `ScopeConditions` is empty — unscoped counters always write `Key` to the root.
 Subject to the same reserved-namespace rules as `Key` and counts as a separate field for cross-counter uniqueness checks.
 
@@ -759,17 +760,9 @@ Type: `objectarray`
 
 When set, each span satisfying all of these conditions becomes an "anchor" and receives the count of matching descendant spans in its own subtree (including the anchor span itself when it matches `Conditions`).
 When omitted, the counter writes a single trace-wide total to the root span — the original SpanCounter behavior.
+Set `RootKey` alongside `ScopeConditions` to additionally emit the trace-wide total on the root.
 Nested anchors are not special-cased: an outer anchor's count includes the descendant subtree even if it crosses an inner anchor.
 Uses the same condition format as rules-based sampler conditions; the trace-level `has-root-span` operator is rejected at validation.
 
 Type: `objectarray`
-
-### `EmitTotalOnRoot`
-
-When ScopeConditions is empty this defaults to `true` (today's behavior — the trace-wide total is written to the root).
-When ScopeConditions is non-empty this defaults to `false` (only the per-anchor counts are written).
-Setting it explicitly overrides the default.
-Setting `false` with no ScopeConditions disables all writes for the counter and produces a validation warning.
-
-Type: `bool`
 

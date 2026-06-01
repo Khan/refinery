@@ -338,48 +338,20 @@ func TestMatchesScope_RootPrefixSupported(t *testing.T) {
 	assert.False(t, counter.MatchesScope(spanData{}, nil))
 }
 
-func TestShouldEmitTotalOnRoot_Defaults(t *testing.T) {
-	// No ScopeConditions, no override → true (today's behavior).
-	unscoped := SpanCounter{Key: "k"}
-	assert.True(t, unscoped.ShouldEmitTotalOnRoot())
+func TestShouldEmitTotalOnRoot(t *testing.T) {
+	// Unscoped → always emit on root (today's behavior).
+	assert.True(t, (&SpanCounter{Key: "k"}).ShouldEmitTotalOnRoot())
 
-	// ScopeConditions set, no override → false (per-anchor-only).
+	// Scoped, no RootKey → per-anchor only, no root write.
 	scoped := SpanCounter{
-		Key: "k",
-		ScopeConditions: []*RulesBasedSamplerCondition{
-			cond("anchor", Exists, nil),
-		},
+		Key:             "k",
+		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
 	}
 	assert.False(t, scoped.ShouldEmitTotalOnRoot())
-}
 
-func TestShouldEmitTotalOnRoot_ExplicitOverride(t *testing.T) {
-	tr := true
-	fa := false
-
-	// Override true with no scope.
-	c := SpanCounter{Key: "k", EmitTotalOnRoot: &tr}
-	assert.True(t, c.ShouldEmitTotalOnRoot())
-
-	// Override false with no scope (no-op).
-	c = SpanCounter{Key: "k", EmitTotalOnRoot: &fa}
-	assert.False(t, c.ShouldEmitTotalOnRoot())
-
-	// Override true with scope.
-	c = SpanCounter{
-		Key:             "k",
-		EmitTotalOnRoot: &tr,
-		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
-	}
-	assert.True(t, c.ShouldEmitTotalOnRoot())
-
-	// Override false with scope (matches default).
-	c = SpanCounter{
-		Key:             "k",
-		EmitTotalOnRoot: &fa,
-		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
-	}
-	assert.False(t, c.ShouldEmitTotalOnRoot())
+	// Scoped + RootKey set → emit total on root.
+	scoped.RootKey = "rk"
+	assert.True(t, scoped.ShouldEmitTotalOnRoot())
 }
 
 func TestEffectiveRootKey(t *testing.T) {
@@ -391,12 +363,13 @@ func TestEffectiveRootKey(t *testing.T) {
 	c = SpanCounter{Key: "k", RootKey: "rk"}
 	assert.Equal(t, "k", c.EffectiveRootKey())
 
-	// Scoped + no RootKey → Key (per-anchor and root share the same name).
+	// Scoped + no RootKey → empty string; ShouldEmitTotalOnRoot is false so
+	// nothing is written to the root and this value isn't consulted.
 	c = SpanCounter{
 		Key:             "k",
 		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
 	}
-	assert.Equal(t, "k", c.EffectiveRootKey())
+	assert.Equal(t, "", c.EffectiveRootKey())
 
 	// Scoped + RootKey set → RootKey overrides the root write.
 	c = SpanCounter{
@@ -486,29 +459,6 @@ func TestValidateSpanCounterEntry_MetaNamespaceWarning(t *testing.T) {
 	require.Len(t, results, 1)
 	assert.Equal(t, Warning, results[0].Severity)
 	assert.Contains(t, results[0].Message, "meta.")
-}
-
-func TestValidateSpanCounterEntry_NoopWarning(t *testing.T) {
-	seen := map[string]int{}
-	// EmitTotalOnRoot=false with no ScopeConditions → warning.
-	results := validateSpanCounterEntry(0, map[string]any{
-		"Key":             "k",
-		"EmitTotalOnRoot": false,
-	}, seen)
-	require.Len(t, results, 1)
-	assert.Equal(t, Warning, results[0].Severity)
-	assert.Contains(t, results[0].Message, "disables all writes")
-
-	// EmitTotalOnRoot=false with ScopeConditions present → no warning (per-anchor still writes).
-	seen = map[string]int{}
-	results = validateSpanCounterEntry(0, map[string]any{
-		"Key":             "k2",
-		"EmitTotalOnRoot": false,
-		"ScopeConditions": []any{
-			map[string]any{"Field": "x", "Operator": "exists"},
-		},
-	}, seen)
-	assert.Empty(t, results)
 }
 
 func TestValidateSpanCounterEntry_HasRootSpanInScope(t *testing.T) {

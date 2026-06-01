@@ -11,19 +11,19 @@ type SpanData interface {
 
 // SpanCounter defines a custom span count to be computed and emitted.
 //
-// By default (no ScopeConditions), Spans are counted if they satisfy all
+// By default (no ScopeConditions), spans are counted if they satisfy all
 // Conditions, and the trace-wide total is written to the root span under Key.
 //
 // When ScopeConditions is set, the counter is computed per-anchor: every span
 // matching ScopeConditions receives the count of matching descendant spans in
-// its own subtree (including itself if it matches Conditions). EmitTotalOnRoot
-// controls whether the trace-wide total is additionally written to the root.
+// its own subtree (including itself if it matches Conditions). Setting
+// RootKey alongside ScopeConditions additionally writes the trace-wide total
+// to the root span under RootKey.
 type SpanCounter struct {
 	Key             string                        `yaml:"Key"`
 	RootKey         string                        `yaml:"RootKey,omitempty"`
 	Conditions      []*RulesBasedSamplerCondition `yaml:"Conditions,omitempty"`
 	ScopeConditions []*RulesBasedSamplerCondition `yaml:"ScopeConditions,omitempty"`
-	EmitTotalOnRoot *bool                         `yaml:"EmitTotalOnRoot,omitempty"`
 }
 
 // Init initializes all conditions. Must be called before MatchesSpan.
@@ -59,23 +59,22 @@ func (c *SpanCounter) MatchesScope(span SpanData, root SpanData) bool {
 }
 
 // ShouldEmitTotalOnRoot reports whether the trace-wide total should be
-// written to the root span. Defaults to true when ScopeConditions is empty
-// (today's behavior) and false when ScopeConditions is set, unless an
-// explicit EmitTotalOnRoot value overrides.
+// written to the root span. Unscoped counters always do (today's behavior:
+// the only output is a root total under Key). Scoped counters do only when
+// RootKey is explicitly set — opting in by naming the root's field.
 func (c *SpanCounter) ShouldEmitTotalOnRoot() bool {
-	if c.EmitTotalOnRoot != nil {
-		return *c.EmitTotalOnRoot
+	if len(c.ScopeConditions) == 0 {
+		return true
 	}
-	return len(c.ScopeConditions) == 0
+	return c.RootKey != ""
 }
 
 // EffectiveRootKey returns the field name to use when writing the trace-wide
-// total to the root span. When ScopeConditions is set and RootKey is
-// non-empty, RootKey is used so the per-anchor and per-trace counts land on
-// separate field names. Otherwise (unscoped, or scoped with no RootKey
-// override) the root write uses Key, preserving today's behavior.
+// total to the root span. When ScopeConditions is set, the root write uses
+// RootKey (which is also what opts the root into receiving a write at all);
+// otherwise (unscoped) it uses Key, preserving today's behavior.
 func (c *SpanCounter) EffectiveRootKey() string {
-	if len(c.ScopeConditions) > 0 && c.RootKey != "" {
+	if len(c.ScopeConditions) > 0 {
 		return c.RootKey
 	}
 	return c.Key

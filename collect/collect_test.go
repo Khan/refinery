@@ -2215,7 +2215,6 @@ func findEventBySpanID(events []*types.Event, id string) *types.Event {
 //	├── r4 ── db4a, db4b
 //	└── r5 ── db5a, db5b
 func TestCustomSpanCounts_Scoped_MultipleAnchors(t *testing.T) {
-	emitFalse := false
 	counters := []config.SpanCounter{{
 		Key: "db_call_count",
 		Conditions: []*config.RulesBasedSamplerCondition{
@@ -2224,7 +2223,6 @@ func TestCustomSpanCounts_Scoped_MultipleAnchors(t *testing.T) {
 		ScopeConditions: []*config.RulesBasedSamplerCondition{
 			{Field: "graphql.operation.name", Operator: config.Exists},
 		},
-		EmitTotalOnRoot: &emitFalse,
 	}}
 	coll := newTestCollector(t, customCountConf(counters))
 	transmission := coll.Transmission.(*transmit.MockTransmission)
@@ -2259,7 +2257,7 @@ func TestCustomSpanCounts_Scoped_MultipleAnchors(t *testing.T) {
 
 	root := findEventBySpanID(events, "s0")
 	require.NotNil(t, root)
-	assert.Nil(t, root.Data.Get("db_call_count"), "EmitTotalOnRoot=false → no root write")
+	assert.Nil(t, root.Data.Get("db_call_count"), "no RootKey set → no root write")
 	for r := 1; r <= 5; r++ {
 		for d := 0; d < 2; d++ {
 			ev := findEventBySpanID(events, fmt.Sprintf("db%d%d", r, d))
@@ -2269,20 +2267,19 @@ func TestCustomSpanCounts_Scoped_MultipleAnchors(t *testing.T) {
 	}
 }
 
-// TestCustomSpanCounts_Scoped_EmitTotalOnRoot verifies that when
-// EmitTotalOnRoot=true, the root also receives the trace-wide total along
-// with per-anchor counts.
-func TestCustomSpanCounts_Scoped_EmitTotalOnRoot(t *testing.T) {
-	emitTrue := true
+// TestCustomSpanCounts_Scoped_RootTotalViaRootKey verifies that setting
+// RootKey alongside ScopeConditions causes the root to receive the
+// trace-wide total under RootKey, while anchors still get Key.
+func TestCustomSpanCounts_Scoped_RootTotalViaRootKey(t *testing.T) {
 	counters := []config.SpanCounter{{
-		Key: "db_call_count",
+		Key:     "db_call_count",
+		RootKey: "db_call_total",
 		Conditions: []*config.RulesBasedSamplerCondition{
 			{Field: "name", Operator: config.EQ, Value: "db.query"},
 		},
 		ScopeConditions: []*config.RulesBasedSamplerCondition{
 			{Field: "graphql.operation.name", Operator: config.Exists},
 		},
-		EmitTotalOnRoot: &emitTrue,
 	}}
 	coll := newTestCollector(t, customCountConf(counters))
 	transmission := coll.Transmission.(*transmit.MockTransmission)
@@ -2312,10 +2309,12 @@ func TestCustomSpanCounts_Scoped_EmitTotalOnRoot(t *testing.T) {
 		ev := findEventBySpanID(events, fmt.Sprintf("r%d", r))
 		require.NotNil(t, ev)
 		assert.Equal(t, int64(4), ev.Data.Get("db_call_count"))
+		assert.Nil(t, ev.Data.Get("db_call_total"))
 	}
 	root := findEventBySpanID(events, "s0")
 	require.NotNil(t, root)
-	assert.Equal(t, int64(12), root.Data.Get("db_call_count"), "root should get trace-wide total")
+	assert.Equal(t, int64(12), root.Data.Get("db_call_total"), "root should get trace-wide total under RootKey")
+	assert.Nil(t, root.Data.Get("db_call_count"), "root does not receive Key when RootKey is set")
 }
 
 // TestCustomSpanCounts_Scoped_RootKey verifies that when both
@@ -2323,7 +2322,6 @@ func TestCustomSpanCounts_Scoped_EmitTotalOnRoot(t *testing.T) {
 // the root's trace-wide total uses RootKey — landing on a separate field
 // so the two counts can be queried independently.
 func TestCustomSpanCounts_Scoped_RootKey(t *testing.T) {
-	emitTrue := true
 	counters := []config.SpanCounter{{
 		Key:     "resolver_db_count",
 		RootKey: "trace_db_count",
@@ -2333,7 +2331,6 @@ func TestCustomSpanCounts_Scoped_RootKey(t *testing.T) {
 		ScopeConditions: []*config.RulesBasedSamplerCondition{
 			{Field: "graphql.operation.name", Operator: config.Exists},
 		},
-		EmitTotalOnRoot: &emitTrue,
 	}}
 	coll := newTestCollector(t, customCountConf(counters))
 	transmission := coll.Transmission.(*transmit.MockTransmission)
@@ -2501,19 +2498,18 @@ func TestCustomSpanCounts_Scoped_AnchorMatchesRoot(t *testing.T) {
 }
 
 // TestCustomSpanCounts_Scoped_AnchorMatchesNothing verifies that when no span
-// matches ScopeConditions, no anchor writes occur; with EmitTotalOnRoot=true
-// the root still receives the trace-wide total.
+// matches ScopeConditions, no anchor writes occur. RootKey is set so the root
+// still receives the trace-wide total.
 func TestCustomSpanCounts_Scoped_AnchorMatchesNothing(t *testing.T) {
-	emitTrue := true
 	counters := []config.SpanCounter{{
-		Key: "errs",
+		Key:     "errs",
+		RootKey: "err_total",
 		Conditions: []*config.RulesBasedSamplerCondition{
 			{Field: "error", Operator: config.EQ, Value: true},
 		},
 		ScopeConditions: []*config.RulesBasedSamplerCondition{
 			{Field: "no-such-anchor", Operator: config.Exists},
 		},
-		EmitTotalOnRoot: &emitTrue,
 	}}
 	coll := newTestCollector(t, customCountConf(counters))
 	transmission := coll.Transmission.(*transmit.MockTransmission)
@@ -2536,7 +2532,8 @@ func TestCustomSpanCounts_Scoped_AnchorMatchesNothing(t *testing.T) {
 
 	root := findEventBySpanID(events, "s0")
 	require.NotNil(t, root)
-	assert.Equal(t, int64(2), root.Data.Get("errs"), "EmitTotalOnRoot=true → root has trace-wide total")
+	assert.Equal(t, int64(2), root.Data.Get("err_total"), "RootKey set → root has trace-wide total")
+	assert.Nil(t, root.Data.Get("errs"), "anchor Key not written to root")
 }
 
 // TestCustomSpanCounts_Scoped_AnchorMatchesEverySpan verifies a permissive
@@ -2572,19 +2569,18 @@ func TestCustomSpanCounts_Scoped_AnchorMatchesEverySpan(t *testing.T) {
 
 // TestCustomSpanCounts_Scoped_MultiForestEmitTotal verifies that a trace with
 // two forest roots (a missing intermediate span — e.g., a load balancer not
-// in Refinery's view) produces a correct trace-wide total when
-// EmitTotalOnRoot=true. The total sums each forest's subtree counts.
+// in Refinery's view) produces a correct trace-wide total when RootKey is
+// set. The total sums each forest's subtree counts.
 func TestCustomSpanCounts_Scoped_MultiForestEmitTotal(t *testing.T) {
-	emitTrue := true
 	counters := []config.SpanCounter{{
-		Key: "db_call_count",
+		Key:     "db_call_count",
+		RootKey: "db_call_total",
 		Conditions: []*config.RulesBasedSamplerCondition{
 			{Field: "name", Operator: config.EQ, Value: "db.query"},
 		},
 		ScopeConditions: []*config.RulesBasedSamplerCondition{
 			{Field: "graphql.operation.name", Operator: config.Exists},
 		},
-		EmitTotalOnRoot: &emitTrue,
 	}}
 	coll := newTestCollector(t, customCountConf(counters))
 	transmission := coll.Transmission.(*transmit.MockTransmission)
@@ -2624,13 +2620,13 @@ func TestCustomSpanCounts_Scoped_MultiForestEmitTotal(t *testing.T) {
 
 	assert.Equal(t, int64(1), findEventBySpanID(events, "a1").Data.Get("db_call_count"))
 	assert.Equal(t, int64(2), findEventBySpanID(events, "b1").Data.Get("db_call_count"))
-	assert.Equal(t, int64(3), findEventBySpanID(events, "s0").Data.Get("db_call_count"),
+	assert.Equal(t, int64(3), findEventBySpanID(events, "s0").Data.Get("db_call_total"),
 		"trace-wide total must sum across both forest roots")
 }
 
-// TestCustomSpanCounts_Scoped_MultiForestNoTotal verifies that with
-// EmitTotalOnRoot=false, anchors in disjoint forests still get correct
-// per-anchor counts and no root write happens.
+// TestCustomSpanCounts_Scoped_MultiForestNoTotal verifies that with no
+// RootKey set, anchors in disjoint forests still get correct per-anchor
+// counts and no root write happens.
 func TestCustomSpanCounts_Scoped_MultiForestNoTotal(t *testing.T) {
 	counters := []config.SpanCounter{{
 		Key: "db_call_count",
@@ -2673,7 +2669,7 @@ func TestCustomSpanCounts_Scoped_MultiForestNoTotal(t *testing.T) {
 	assert.Equal(t, int64(1), findEventBySpanID(events, "a1").Data.Get("db_call_count"))
 	assert.Equal(t, int64(1), findEventBySpanID(events, "b1").Data.Get("db_call_count"))
 	assert.Nil(t, findEventBySpanID(events, "s0").Data.Get("db_call_count"),
-		"EmitTotalOnRoot defaults to false when scope set")
+		"no RootKey set → no root write")
 }
 
 // TestCustomSpanCounts_Scoped_TwoCycleDefense verifies that a parent-ID cycle

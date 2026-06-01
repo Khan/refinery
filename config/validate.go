@@ -754,15 +754,6 @@ func validateSpanCounterEntry(idx int, entry map[string]any, seenKeys map[string
 		})
 	}
 
-	if v, ok := entry["EmitTotalOnRoot"]; ok {
-		if emit, ok := v.(bool); ok && !emit && scopeIsEmpty {
-			results = append(results, ValidationResult{
-				Message:  fmt.Sprintf("SpanCounters[%d]: EmitTotalOnRoot=false with no ScopeConditions disables all writes for this counter", idx),
-				Severity: Warning,
-			})
-		}
-	}
-
 	for ci, cond := range scopeArr {
 		condMap, ok := cond.(map[string]any)
 		if !ok {
