@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/honeycombio/refinery/config"
+	"github.com/honeycombio/refinery/internal/redistest"
 	"github.com/honeycombio/refinery/logger"
 	"github.com/honeycombio/refinery/metrics"
 	"github.com/honeycombio/refinery/pubsub"
@@ -22,17 +23,20 @@ var types = []string{
 	"local",
 }
 
-func newPubSub(typ string) pubsub.PubSub {
+func newPubSub(t testing.TB, typ string) pubsub.PubSub {
+	t.Helper()
 	var ps pubsub.PubSub
 	m := &metrics.NullMetrics{}
 	m.Start()
 	tracer := noop.NewTracerProvider().Tracer("test")
 	switch typ {
 	case "goredis":
+		host, port := redistest.Endpoint(t)
 		ps = &pubsub.GoRedisPubSub{
 			Config: &config.MockConfig{
 				GetRedisPeerManagementVal: config.RedisPeerManagementConfig{
 					ClusterName: "test",
+					Host:        host + ":" + port,
 				},
 			},
 			Metrics: m,
@@ -71,7 +75,7 @@ func TestPubSubBasics(t *testing.T) {
 	ctx := context.Background()
 	for _, typ := range types {
 		t.Run(typ, func(t *testing.T) {
-			ps := newPubSub(typ)
+			ps := newPubSub(t, typ)
 
 			l1 := &pubsubListener{}
 
@@ -105,7 +109,7 @@ func TestPubSubMultiSubscriber(t *testing.T) {
 	ctx := context.Background()
 	for _, typ := range types {
 		t.Run(typ, func(t *testing.T) {
-			ps := newPubSub(typ)
+			ps := newPubSub(t, typ)
 			l1 := &pubsubListener{}
 			l2 := &pubsubListener{}
 			topic := ps.FormatTopic("topic")
@@ -138,7 +142,7 @@ func TestPubSubMultiTopic(t *testing.T) {
 	ctx := context.Background()
 	for _, typ := range types {
 		t.Run(typ, func(t *testing.T) {
-			ps := newPubSub(typ)
+			ps := newPubSub(t, typ)
 			time.Sleep(500 * time.Millisecond)
 			topics := make([]string, topicCount)
 			listeners := make([]*pubsubListener, topicCount)
@@ -190,7 +194,7 @@ func TestPubSubLatency(t *testing.T) {
 	ctx := context.Background()
 	for _, typ := range types {
 		t.Run(typ, func(t *testing.T) {
-			ps := newPubSub(typ)
+			ps := newPubSub(t, typ)
 			var count, total, tmin, tmax int64
 			mut := sync.Mutex{}
 
@@ -252,7 +256,7 @@ func BenchmarkPubSub(b *testing.B) {
 	ctx := context.Background()
 	for _, typ := range types {
 		b.Run(typ, func(b *testing.B) {
-			ps := newPubSub(typ)
+			ps := newPubSub(b, typ)
 			time.Sleep(100 * time.Millisecond)
 
 			li := &pubsubListener{}
