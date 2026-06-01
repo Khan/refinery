@@ -663,6 +663,42 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 				seenKeys := make(map[string]int, len(arr))
 				for i, entry := range arr {
 					if entryMap, ok := entry.(map[string]any); ok {
+						// ScopeConditions reuses the structure of Conditions but
+						// the metadata-driven walker would look up a group named
+						// "ScopeConditions" (which doesn't exist). Validate
+						// ScopeConditions entries directly against the
+						// "Conditions" group and remove the key before the
+						// recursive Validate call.
+						scopeKey := "ScopeConditions"
+						scope, hasScope := entryMap[scopeKey]
+						if hasScope {
+							delete(entryMap, scopeKey)
+							if scopeArr, ok := scope.([]any); ok {
+								for ci, cond := range scopeArr {
+									condMap, ok := cond.(map[string]any)
+									if !ok {
+										results = append(results, ValidationResult{
+											Message:  fmt.Sprintf("SpanCounters[%d].ScopeConditions[%d] must be an object, but %v is %T", i, ci, cond, cond),
+											Severity: Error,
+										})
+										continue
+									}
+									subresults := m.Validate(map[string]any{"Conditions": condMap})
+									for _, result := range subresults {
+										results = append(results, ValidationResult{
+											Message:  fmt.Sprintf("Within SpanCounters[%d].ScopeConditions[%d]: %s", i, ci, result.Message),
+											Severity: result.Severity,
+										})
+									}
+								}
+							} else {
+								results = append(results, ValidationResult{
+									Message:  fmt.Sprintf("SpanCounters[%d].ScopeConditions must be an array, but %v is %T", i, scope, scope),
+									Severity: Error,
+								})
+							}
+						}
+
 						rulesmap := map[string]any{"SpanCounters": entryMap}
 						subresults := m.Validate(rulesmap)
 						for _, result := range subresults {
@@ -670,6 +706,10 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 								Message:  fmt.Sprintf("Within SpanCounters[%d]: %s", i, result.Message),
 								Severity: result.Severity,
 							})
+						}
+
+						if hasScope {
+							entryMap[scopeKey] = scope
 						}
 						results = append(results, validateSpanCounterEntry(i, entryMap, seenKeys)...)
 					} else {

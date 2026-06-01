@@ -461,6 +461,64 @@ func TestValidateSpanCounterEntry_MetaNamespaceWarning(t *testing.T) {
 	assert.Contains(t, results[0].Message, "meta.")
 }
 
+// TestValidateRules_ScopeConditionsThroughMetadata exercises the full
+// ValidateRules path with a realistic rules document that uses
+// ScopeConditions. This is a regression test for a bug where the
+// metadata-driven walker tried to resolve ScopeConditions against a
+// non-existent "ScopeConditions" group and produced "unknown group" /
+// "unknown field" errors for every condition entry.
+func TestValidateRules_ScopeConditionsThroughMetadata(t *testing.T) {
+	m, err := LoadRulesMetadata()
+	require.NoError(t, err)
+
+	rules := map[string]any{
+		"RulesVersion": 2,
+		"Samplers": map[string]any{
+			"__default__": map[string]any{
+				"DeterministicSampler": map[string]any{
+					"SampleRate": 1,
+				},
+			},
+		},
+		"SpanCounters": []any{
+			map[string]any{
+				"Key":     "graphql.db_call_count",
+				"RootKey": "trace.db_call_total",
+				"ScopeConditions": []any{
+					map[string]any{"Field": "graphql.field", "Operator": "exists"},
+				},
+				"Conditions": []any{
+					map[string]any{"Field": "db.system", "Operator": "=", "Value": "postgresql", "Datatype": "string"},
+				},
+			},
+		},
+	}
+
+	results := m.ValidateRules(rules)
+	for _, r := range results {
+		assert.NotContains(t, r.Message, "unknown group ScopeConditions",
+			"metadata walker should not look up ScopeConditions as a group")
+		assert.NotContains(t, r.Message, "unknown field ScopeConditions.",
+			"metadata walker should not try to validate ScopeConditions.* directly")
+	}
+
+	// Same shape but with a bogus operator inside ScopeConditions — the
+	// metadata-driven "choice" validation on Operator should still catch
+	// this even though we routed ScopeConditions entries through the
+	// "Conditions" group manually.
+	rules["SpanCounters"].([]any)[0].(map[string]any)["ScopeConditions"] = []any{
+		map[string]any{"Field": "graphql.field", "Operator": "nonsense-op"},
+	}
+	results = m.ValidateRules(rules)
+	var sawBadOp bool
+	for _, r := range results {
+		if r.Severity == Error && strings.Contains(r.Message, "nonsense-op") {
+			sawBadOp = true
+		}
+	}
+	assert.True(t, sawBadOp, "bogus Operator inside ScopeConditions must still fail metadata validation")
+}
+
 func TestValidateSpanCounterEntry_HasRootSpanInScope(t *testing.T) {
 	seen := map[string]int{}
 	results := validateSpanCounterEntry(0, map[string]any{
