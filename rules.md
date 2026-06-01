@@ -3,7 +3,7 @@
 # Honeycomb Refinery Rules Documentation
 
 This is the documentation for the rules configuration for Honeycomb's Refinery.
-It was automatically generated on 2026-04-09 at 22:21:32 UTC.
+It was automatically generated on 2026-05-27 at 17:33:09 UTC.
 
 ## The Rules file
 
@@ -55,6 +55,7 @@ The remainder of this document describes the samplers that can be used within th
 - [Rules for Rules-based Samplers](#rules-for-rules-based-samplers)
 - [Conditions for the Rules in Rules-based Samplers](#conditions-for-the-rules-in-rules-based-samplers)
 - [Total Throughput Sampler](#total-throughput-sampler)
+- [Custom Span Count Configuration](#custom-span-count-configuration)
 
 ---
 ## Deterministic Sampler
@@ -712,6 +713,53 @@ Type: `int`
 Indicates whether to include the trace length (number of spans in the trace) as part of the key.
 The number of spans is exact, so if there are normally small variations in trace length, we recommend setting this field to `false` (the default).
 If your traces are consistent lengths and changes in trace length is a useful indicator to view in Honeycomb, then set this field to `true`.
+
+Type: `bool`
+
+---
+## Custom Span Count Configuration
+
+### Name: `SpanCounters`
+
+Defines a single custom span counter.
+Each counter has a Key that names the field written to a target span and an optional list of Conditions that must all match for a span to be counted.
+By default the trace-wide count is written to the root span under Key.
+When ScopeConditions is set, every span matching ScopeConditions instead receives the count of matching descendant spans in its own subtree, and EmitTotalOnRoot controls whether the trace-wide total is additionally written to the root.
+If no root span exists when the trace is sent, root writes go to the first non-annotation span instead.
+
+### `Key`
+
+The name of the field that will be added to each target span.
+Must not be empty.
+Keys in the `meta.refinery.` namespace are reserved for Refinery's own metadata and are rejected at validation.
+Keys starting with `meta.` produce a warning, because int fields with a value of `0` cannot be distinguished from a missing field on the wire — meaning zero-count anchors will appear absent to downstream queries.
+
+Type: `string`
+
+### `Conditions`
+
+All conditions must match for a span to be counted.
+If empty, every span in the trace is counted.
+Uses the same condition format as rules-based sampler conditions.
+An anchor span (one matching `ScopeConditions`) is also tested against Conditions like any other span — if it matches, it counts itself.
+
+Type: `objectarray`
+
+### `ScopeConditions`
+
+When set, each span satisfying all of these conditions becomes an "anchor" and receives the count of matching descendant spans in its own subtree (including the anchor span itself when it matches `Conditions`).
+When omitted, the counter writes a single trace-wide total to the root span — the original SpanCounter behavior.
+Nested anchors are not special-cased: an outer anchor's count includes the descendant subtree even if it crosses an inner anchor.
+Uses the same condition format as rules-based sampler conditions; the trace-level `has-root-span` operator is rejected at validation.
+
+Type: `objectarray`
+
+### `EmitTotalOnRoot`
+
+When ScopeConditions is empty this defaults to `true` (today's behavior — the trace-wide total is written to the root).
+When ScopeConditions is non-empty this defaults to `false` (only the per-anchor counts are written).
+Setting it explicitly overrides the default.
+Setting `false` with no ScopeConditions disables all writes for the counter and produces a validation warning.
 
 Type: `bool`
 

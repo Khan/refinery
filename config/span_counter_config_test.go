@@ -1,9 +1,11 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // spanData is a simple map-backed implementation of SpanData for tests.
@@ -299,4 +301,154 @@ func TestMatchesSpan_ExistsAndNotExists(t *testing.T) {
 	assert.False(t, exists.MatchesSpan(without, nil))
 	assert.False(t, notExists.MatchesSpan(withField, nil))
 	assert.True(t, notExists.MatchesSpan(without, nil))
+}
+
+// ----------------------------------------------------------------------------
+// SpanCounter.MatchesScope / ShouldEmitTotalOnRoot
+// ----------------------------------------------------------------------------
+
+func TestMatchesScope_EmptyScopeNeverMatches(t *testing.T) {
+	counter := SpanCounter{Key: "k"}
+	assert.False(t, counter.MatchesScope(spanData{"foo": "bar"}, nil))
+	assert.False(t, counter.MatchesScope(spanData{}, nil))
+}
+
+func TestMatchesScope_AllConditionsMustMatch(t *testing.T) {
+	counter := SpanCounter{
+		Key: "k",
+		ScopeConditions: []*RulesBasedSamplerCondition{
+			cond("graphql.operation.name", Exists, nil),
+			cond("kind", EQ, "server"),
+		},
+	}
+	assert.True(t, counter.MatchesScope(spanData{"graphql.operation.name": "Q", "kind": "server"}, nil))
+	assert.False(t, counter.MatchesScope(spanData{"graphql.operation.name": "Q"}, nil))
+	assert.False(t, counter.MatchesScope(spanData{"kind": "server"}, nil))
+}
+
+func TestMatchesScope_RootPrefixSupported(t *testing.T) {
+	counter := SpanCounter{
+		Key: "k",
+		ScopeConditions: []*RulesBasedSamplerCondition{
+			cond("root.service.name", EQ, "api"),
+		},
+	}
+	assert.True(t, counter.MatchesScope(spanData{}, spanData{"service.name": "api"}))
+	assert.False(t, counter.MatchesScope(spanData{}, spanData{"service.name": "worker"}))
+	assert.False(t, counter.MatchesScope(spanData{}, nil))
+}
+
+func TestShouldEmitTotalOnRoot_Defaults(t *testing.T) {
+	// No ScopeConditions, no override → true (today's behavior).
+	unscoped := SpanCounter{Key: "k"}
+	assert.True(t, unscoped.ShouldEmitTotalOnRoot())
+
+	// ScopeConditions set, no override → false (per-anchor-only).
+	scoped := SpanCounter{
+		Key: "k",
+		ScopeConditions: []*RulesBasedSamplerCondition{
+			cond("anchor", Exists, nil),
+		},
+	}
+	assert.False(t, scoped.ShouldEmitTotalOnRoot())
+}
+
+func TestShouldEmitTotalOnRoot_ExplicitOverride(t *testing.T) {
+	tr := true
+	fa := false
+
+	// Override true with no scope.
+	c := SpanCounter{Key: "k", EmitTotalOnRoot: &tr}
+	assert.True(t, c.ShouldEmitTotalOnRoot())
+
+	// Override false with no scope (no-op).
+	c = SpanCounter{Key: "k", EmitTotalOnRoot: &fa}
+	assert.False(t, c.ShouldEmitTotalOnRoot())
+
+	// Override true with scope.
+	c = SpanCounter{
+		Key:             "k",
+		EmitTotalOnRoot: &tr,
+		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
+	}
+	assert.True(t, c.ShouldEmitTotalOnRoot())
+
+	// Override false with scope (matches default).
+	c = SpanCounter{
+		Key:             "k",
+		EmitTotalOnRoot: &fa,
+		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
+	}
+	assert.False(t, c.ShouldEmitTotalOnRoot())
+}
+
+// ----------------------------------------------------------------------------
+// validateSpanCounterEntry (custom rules)
+// ----------------------------------------------------------------------------
+
+func TestValidateSpanCounterEntry_DuplicateKey(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{"Key": "k"}, seen)
+	assert.Empty(t, results)
+	results = validateSpanCounterEntry(1, map[string]any{"Key": "k"}, seen)
+	require.Len(t, results, 1)
+	assert.Equal(t, Error, results[0].Severity)
+	assert.Contains(t, results[0].Message, "duplicate Key")
+}
+
+func TestValidateSpanCounterEntry_ReservedNamespace(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{"Key": "meta.refinery.reserved"}, seen)
+	require.Len(t, results, 1)
+	assert.Equal(t, Error, results[0].Severity)
+	assert.Contains(t, results[0].Message, "reserved")
+}
+
+func TestValidateSpanCounterEntry_MetaNamespaceWarning(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{"Key": "meta.custom"}, seen)
+	require.Len(t, results, 1)
+	assert.Equal(t, Warning, results[0].Severity)
+	assert.Contains(t, results[0].Message, "meta.")
+}
+
+func TestValidateSpanCounterEntry_NoopWarning(t *testing.T) {
+	seen := map[string]int{}
+	// EmitTotalOnRoot=false with no ScopeConditions → warning.
+	results := validateSpanCounterEntry(0, map[string]any{
+		"Key":             "k",
+		"EmitTotalOnRoot": false,
+	}, seen)
+	require.Len(t, results, 1)
+	assert.Equal(t, Warning, results[0].Severity)
+	assert.Contains(t, results[0].Message, "disables all writes")
+
+	// EmitTotalOnRoot=false with ScopeConditions present → no warning (per-anchor still writes).
+	seen = map[string]int{}
+	results = validateSpanCounterEntry(0, map[string]any{
+		"Key":             "k2",
+		"EmitTotalOnRoot": false,
+		"ScopeConditions": []any{
+			map[string]any{"Field": "x", "Operator": "exists"},
+		},
+	}, seen)
+	assert.Empty(t, results)
+}
+
+func TestValidateSpanCounterEntry_HasRootSpanInScope(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{
+		"Key": "k",
+		"ScopeConditions": []any{
+			map[string]any{"Operator": HasRootSpan},
+		},
+	}, seen)
+	require.NotEmpty(t, results)
+	var sawErr bool
+	for _, r := range results {
+		if r.Severity == Error && strings.Contains(r.Message, HasRootSpan) {
+			sawErr = true
+		}
+	}
+	assert.True(t, sawErr, "must reject HasRootSpan in ScopeConditions")
 }

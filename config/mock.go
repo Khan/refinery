@@ -60,6 +60,7 @@ type MockConfig struct {
 	AdditionalHeaders                map[string]string
 	TraceIdFieldNames                []string
 	ParentIdFieldNames               []string
+	SpanIdFieldNames                 []string
 	CfgMetadata                      []ConfigMetadata
 	CfgHash                          string
 	RulesHash                        string
@@ -453,6 +454,13 @@ func (f *MockConfig) GetParentIdFieldNames() []string {
 	defer f.Mux.RUnlock()
 
 	return f.ParentIdFieldNames
+}
+
+func (f *MockConfig) GetSpanIdFieldNames() []string {
+	f.Mux.RLock()
+	defer f.Mux.RUnlock()
+
+	return f.SpanIdFieldNames
 }
 
 func (f *MockConfig) GetConfigMetadata() []ConfigMetadata {

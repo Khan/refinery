@@ -674,16 +674,17 @@ If your traces are consistent lengths and changes in trace length is a useful in
 ## Custom Span Count Configuration
 
 Defines a single custom span counter.
-Each counter has a Key that names the field written to the root span, and an optional list of Conditions that must all match for a span to be counted.
-Spans are counted when all of the entry's Conditions match.
-If Conditions is empty, every span in the trace is counted.
-The counter value is written to the root span under the key specified by `Key`.
-If no root span exists when the trace is sent, the counter is written to the first non-annotation span instead.
+Each counter has a Key that names the field written to a target span and an optional list of Conditions that must all match for a span to be counted.
+By default the trace-wide count is written to the root span under Key.
+When ScopeConditions is set, every span matching ScopeConditions instead receives the count of matching descendant spans in its own subtree, and EmitTotalOnRoot controls whether the trace-wide total is additionally written to the root.
+If no root span exists when the trace is sent, root writes go to the first non-annotation span instead.
 
 ### `Key`
 
-The name of the field that will be added to the root span.
+The name of the field that will be added to each target span.
 Must not be empty.
+Keys in the `meta.refinery.` namespace are reserved for Refinery's own metadata and are rejected at validation.
+Keys starting with `meta.` produce a warning, because int fields with a value of `0` cannot be distinguished from a missing field on the wire — meaning zero-count anchors will appear absent to downstream queries.
 
 - Type: `string`
 
@@ -692,6 +693,25 @@ Must not be empty.
 All conditions must match for a span to be counted.
 If empty, every span in the trace is counted.
 Uses the same condition format as rules-based sampler conditions.
+An anchor span (one matching `ScopeConditions`) is also tested against Conditions like any other span — if it matches, it counts itself.
 
 - Type: `objectarray`
+
+### `ScopeConditions`
+
+When set, each span satisfying all of these conditions becomes an "anchor" and receives the count of matching descendant spans in its own subtree (including the anchor span itself when it matches `Conditions`).
+When omitted, the counter writes a single trace-wide total to the root span — the original SpanCounter behavior.
+Nested anchors are not special-cased: an outer anchor's count includes the descendant subtree even if it crosses an inner anchor.
+Uses the same condition format as rules-based sampler conditions; the trace-level `has-root-span` operator is rejected at validation.
+
+- Type: `objectarray`
+
+### `EmitTotalOnRoot`
+
+When ScopeConditions is empty this defaults to `true` (today's behavior — the trace-wide total is written to the root).
+When ScopeConditions is non-empty this defaults to `false` (only the per-anchor counts are written).
+Setting it explicitly overrides the default.
+Setting `false` with no ScopeConditions disables all writes for the counter and produces a validation warning.
+
+- Type: `bool`
 

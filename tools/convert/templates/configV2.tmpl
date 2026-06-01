@@ -2,7 +2,7 @@
 ## Honeycomb Refinery Configuration ##
 ######################################
 #
-# created {{ now }} from {{ .Input }} using a template generated on 2026-04-09 at 22:21:28 UTC
+# created {{ now }} from {{ .Input }} using a template generated on 2026-05-27 at 17:33:21 UTC
 
 # This file contains a configuration for the Honeycomb Refinery. It is in YAML
 # format, organized into named groups, each of which contains a set of
@@ -1164,6 +1164,16 @@ IDFields:
     ##
     ## Eligible for live reload.
     {{ renderStringarray .Data "ParentNames" "ParentNames" "trace.parent_id,parentId" }}
+
+    ## SpanNames is the list of field names to use for the span ID.
+    ##
+    ## The first field in the list that is present on a span will be used as
+    ## that span's ID. This is required for `SpanCounters` entries that set
+    ## `ScopeConditions` (per-anchor subtree counting), which must resolve
+    ## each span's parent ID to a span ID in the same trace.
+    ##
+    ## Eligible for live reload.
+    {{ renderStringarray .Data "SpanNames" "SpanNames" "trace.span_id,spanId" }}
 
 ############################
 ## gRPC Server Parameters ##

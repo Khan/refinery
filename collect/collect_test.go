@@ -1918,11 +1918,12 @@ func customCountConf(counters []config.SpanCounter) *config.MockConfig {
 		GetSamplerTypeVal:  &config.DeterministicSamplerConfig{SampleRate: 1},
 		TraceIdFieldNames:  []string{"trace.trace_id", "traceId"},
 		ParentIdFieldNames: []string{"trace.parent_id", "parentId"},
+		SpanIdFieldNames:   []string{"trace.span_id", "spanId"},
 		GetCollectionConfigVal: config.CollectionConfig{
 			WorkerCount:       2,
 			ShutdownDelay:     config.Duration(1 * time.Millisecond),
-			IncomingQueueSize: 10,
-			PeerQueueSize:     10,
+			IncomingQueueSize: 1000,
+			PeerQueueSize:     1000,
 		},
 		SpanCounters: counters,
 	}
@@ -2160,6 +2161,572 @@ func TestCustomSpanCounts_NoRootSpan(t *testing.T) {
 	}
 	require.Equal(t, 1, len(counted), "custom count should appear on exactly one span when there is no root")
 	assert.Equal(t, int64(2), counted[0].Data.Get("all_spans"), "both spans should be counted")
+}
+
+// addPeerSpan is a tiny helper for the scoped SpanCounter tests: it constructs
+// a non-root span with the given data and pushes it via AddSpanFromPeer.
+func addPeerSpan(t *testing.T, coll *InMemCollector, traceID string, data map[string]any) {
+	t.Helper()
+	coll.AddSpanFromPeer(&types.Span{
+		TraceID: traceID,
+		Event: &types.Event{
+			Dataset: "test",
+			Data:    types.NewPayload(coll.Config, data),
+			APIKey:  legacyAPIKey,
+		},
+	})
+}
+
+// addRootSpan is a tiny helper for the scoped SpanCounter tests: it constructs
+// a root span with the given data and pushes it via AddSpan.
+func addRootSpan(t *testing.T, coll *InMemCollector, traceID string, data map[string]any) {
+	t.Helper()
+	coll.AddSpan(&types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event: &types.Event{
+			Dataset: "test",
+			Data:    types.NewPayload(coll.Config, data),
+			APIKey:  legacyAPIKey,
+		},
+	})
+}
+
+// findEventBySpanID returns the first event whose span ID matches.
+func findEventBySpanID(events []*types.Event, id string) *types.Event {
+	for _, ev := range events {
+		if ev.Data.Get("trace.span_id") == id {
+			return ev
+		}
+	}
+	return nil
+}
+
+// TestCustomSpanCounts_Scoped_MultipleAnchors verifies that a single
+// ScopeConditions-equipped counter writes per-anchor subtree counts.
+//
+// Trace shape (5 resolver anchors, each with 2 db.query descendants):
+//
+//	root (s0)
+//	├── r1 ── db1a, db1b
+//	├── r2 ── db2a, db2b
+//	├── r3 ── db3a, db3b
+//	├── r4 ── db4a, db4b
+//	└── r5 ── db5a, db5b
+func TestCustomSpanCounts_Scoped_MultipleAnchors(t *testing.T) {
+	emitFalse := false
+	counters := []config.SpanCounter{{
+		Key: "db_call_count",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+		EmitTotalOnRoot: &emitFalse,
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "scoped-many-anchors"
+
+	for r := 1; r <= 5; r++ {
+		resolverID := fmt.Sprintf("r%d", r)
+		addPeerSpan(t, coll, traceID, map[string]any{
+			"trace.span_id":          resolverID,
+			"trace.parent_id":        "s0",
+			"graphql.operation.name": fmt.Sprintf("Query%d", r),
+		})
+		for d := 0; d < 2; d++ {
+			addPeerSpan(t, coll, traceID, map[string]any{
+				"trace.span_id":   fmt.Sprintf("db%d%d", r, d),
+				"trace.parent_id": resolverID,
+				"name":            "db.query",
+			})
+		}
+	}
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(16)
+	require.Equal(t, 16, len(events))
+
+	for r := 1; r <= 5; r++ {
+		ev := findEventBySpanID(events, fmt.Sprintf("r%d", r))
+		require.NotNil(t, ev, "resolver r%d missing", r)
+		assert.Equal(t, int64(2), ev.Data.Get("db_call_count"), "resolver r%d", r)
+	}
+
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Nil(t, root.Data.Get("db_call_count"), "EmitTotalOnRoot=false → no root write")
+	for r := 1; r <= 5; r++ {
+		for d := 0; d < 2; d++ {
+			ev := findEventBySpanID(events, fmt.Sprintf("db%d%d", r, d))
+			require.NotNil(t, ev)
+			assert.Nil(t, ev.Data.Get("db_call_count"), "leaf spans should not be written to")
+		}
+	}
+}
+
+// TestCustomSpanCounts_Scoped_EmitTotalOnRoot verifies that when
+// EmitTotalOnRoot=true, the root also receives the trace-wide total along
+// with per-anchor counts.
+func TestCustomSpanCounts_Scoped_EmitTotalOnRoot(t *testing.T) {
+	emitTrue := true
+	counters := []config.SpanCounter{{
+		Key: "db_call_count",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+		EmitTotalOnRoot: &emitTrue,
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "scoped-with-total"
+	for r := 1; r <= 3; r++ {
+		resolverID := fmt.Sprintf("r%d", r)
+		addPeerSpan(t, coll, traceID, map[string]any{
+			"trace.span_id":          resolverID,
+			"trace.parent_id":        "s0",
+			"graphql.operation.name": fmt.Sprintf("Query%d", r),
+		})
+		for d := 0; d < 4; d++ {
+			addPeerSpan(t, coll, traceID, map[string]any{
+				"trace.span_id":   fmt.Sprintf("db%d%d", r, d),
+				"trace.parent_id": resolverID,
+				"name":            "db.query",
+			})
+		}
+	}
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(16)
+	require.Equal(t, 16, len(events))
+
+	for r := 1; r <= 3; r++ {
+		ev := findEventBySpanID(events, fmt.Sprintf("r%d", r))
+		require.NotNil(t, ev)
+		assert.Equal(t, int64(4), ev.Data.Get("db_call_count"))
+	}
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(12), root.Data.Get("db_call_count"), "root should get trace-wide total")
+}
+
+// TestCustomSpanCounts_Scoped_NestedAnchors verifies that an outer anchor's
+// count includes the inner anchor's subtree (no special-casing of nested
+// anchors).
+//
+//	root (s0)
+//	└── outer (anchor) ── db_outer
+//	    └── inner (anchor) ── db_inner1, db_inner2
+func TestCustomSpanCounts_Scoped_NestedAnchors(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "db_calls",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "anchor", Operator: config.EQ, Value: true},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "nested"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "outer",
+		"trace.parent_id": "s0",
+		"anchor":          true,
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "db_outer",
+		"trace.parent_id": "outer",
+		"name":            "db.query",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "inner",
+		"trace.parent_id": "outer",
+		"anchor":          true,
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "db_inner1",
+		"trace.parent_id": "inner",
+		"name":            "db.query",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "db_inner2",
+		"trace.parent_id": "inner",
+		"name":            "db.query",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(6)
+	require.Equal(t, 6, len(events))
+
+	outer := findEventBySpanID(events, "outer")
+	inner := findEventBySpanID(events, "inner")
+	require.NotNil(t, outer)
+	require.NotNil(t, inner)
+	assert.Equal(t, int64(3), outer.Data.Get("db_calls"), "outer subtree: db_outer + db_inner1 + db_inner2")
+	assert.Equal(t, int64(2), inner.Data.Get("db_calls"), "inner subtree: db_inner1 + db_inner2")
+}
+
+// TestCustomSpanCounts_Scoped_AnchorMatchesRoot verifies the root span can
+// itself be an anchor, in which case the count appears on it once.
+func TestCustomSpanCounts_Scoped_AnchorMatchesRoot(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "all",
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "kind", Operator: config.EQ, Value: "server"},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "anchor-is-root"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c1",
+		"trace.parent_id": "s0",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c2",
+		"trace.parent_id": "s0",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{
+		"trace.span_id": "s0",
+		"kind":          "server",
+	})
+
+	events := transmission.GetBlock(3)
+	require.Equal(t, 3, len(events))
+
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(3), root.Data.Get("all"), "anchor-as-root counts whole subtree")
+	for _, id := range []string{"c1", "c2"} {
+		ev := findEventBySpanID(events, id)
+		require.NotNil(t, ev)
+		assert.Nil(t, ev.Data.Get("all"))
+	}
+}
+
+// TestCustomSpanCounts_Scoped_AnchorMatchesNothing verifies that when no span
+// matches ScopeConditions, no anchor writes occur; with EmitTotalOnRoot=true
+// the root still receives the trace-wide total.
+func TestCustomSpanCounts_Scoped_AnchorMatchesNothing(t *testing.T) {
+	emitTrue := true
+	counters := []config.SpanCounter{{
+		Key: "errs",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "error", Operator: config.EQ, Value: true},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "no-such-anchor", Operator: config.Exists},
+		},
+		EmitTotalOnRoot: &emitTrue,
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "anchor-zero"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c1",
+		"trace.parent_id": "s0",
+		"error":           true,
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c2",
+		"trace.parent_id": "s0",
+		"error":           true,
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(3)
+	require.Equal(t, 3, len(events))
+
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(2), root.Data.Get("errs"), "EmitTotalOnRoot=true → root has trace-wide total")
+}
+
+// TestCustomSpanCounts_Scoped_AnchorMatchesEverySpan verifies a permissive
+// scope (everything is an anchor) — every span receives its own subtree count.
+func TestCustomSpanCounts_Scoped_AnchorMatchesEverySpan(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "subtree",
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "trace.span_id", Operator: config.Exists},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "all-anchors"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c1",
+		"trace.parent_id": "s0",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c2",
+		"trace.parent_id": "c1",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(3)
+	require.Equal(t, 3, len(events))
+
+	assert.Equal(t, int64(3), findEventBySpanID(events, "s0").Data.Get("subtree"))
+	assert.Equal(t, int64(2), findEventBySpanID(events, "c1").Data.Get("subtree"))
+	assert.Equal(t, int64(1), findEventBySpanID(events, "c2").Data.Get("subtree"))
+}
+
+// TestCustomSpanCounts_Scoped_MultiForestEmitTotal verifies that a trace with
+// two forest roots (a missing intermediate span — e.g., a load balancer not
+// in Refinery's view) produces a correct trace-wide total when
+// EmitTotalOnRoot=true. The total sums each forest's subtree counts.
+func TestCustomSpanCounts_Scoped_MultiForestEmitTotal(t *testing.T) {
+	emitTrue := true
+	counters := []config.SpanCounter{{
+		Key: "db_call_count",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+		EmitTotalOnRoot: &emitTrue,
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "multi-forest"
+	// Forest A: parent points to a missing "missing-lb" span.
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":          "a1",
+		"trace.parent_id":        "missing-lb",
+		"graphql.operation.name": "QueryA",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "a_db1",
+		"trace.parent_id": "a1",
+		"name":            "db.query",
+	})
+	// Forest B (with the root span the chooser will pick).
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":          "b1",
+		"trace.parent_id":        "s0",
+		"graphql.operation.name": "QueryB",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "b_db1",
+		"trace.parent_id": "b1",
+		"name":            "db.query",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "b_db2",
+		"trace.parent_id": "b1",
+		"name":            "db.query",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(6)
+	require.Equal(t, 6, len(events))
+
+	assert.Equal(t, int64(1), findEventBySpanID(events, "a1").Data.Get("db_call_count"))
+	assert.Equal(t, int64(2), findEventBySpanID(events, "b1").Data.Get("db_call_count"))
+	assert.Equal(t, int64(3), findEventBySpanID(events, "s0").Data.Get("db_call_count"),
+		"trace-wide total must sum across both forest roots")
+}
+
+// TestCustomSpanCounts_Scoped_MultiForestNoTotal verifies that with
+// EmitTotalOnRoot=false, anchors in disjoint forests still get correct
+// per-anchor counts and no root write happens.
+func TestCustomSpanCounts_Scoped_MultiForestNoTotal(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "db_call_count",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "multi-forest-no-total"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":          "a1",
+		"trace.parent_id":        "missing-lb",
+		"graphql.operation.name": "QueryA",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "a_db",
+		"trace.parent_id": "a1",
+		"name":            "db.query",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":          "b1",
+		"trace.parent_id":        "s0",
+		"graphql.operation.name": "QueryB",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "b_db",
+		"trace.parent_id": "b1",
+		"name":            "db.query",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(5)
+	require.Equal(t, 5, len(events))
+
+	assert.Equal(t, int64(1), findEventBySpanID(events, "a1").Data.Get("db_call_count"))
+	assert.Equal(t, int64(1), findEventBySpanID(events, "b1").Data.Get("db_call_count"))
+	assert.Nil(t, findEventBySpanID(events, "s0").Data.Get("db_call_count"),
+		"EmitTotalOnRoot defaults to false when scope set")
+}
+
+// TestCustomSpanCounts_Scoped_TwoCycleDefense verifies that a parent-ID cycle
+// (X.parent=Y, Y.parent=X), neither a forest root, does not cause an infinite
+// loop and that both spans get a count via the unvisited-island pass.
+func TestCustomSpanCounts_Scoped_TwoCycleDefense(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "self",
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "trace.span_id", Operator: config.Exists},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "two-cycle"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "x",
+		"trace.parent_id": "y",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "y",
+		"trace.parent_id": "x",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(3)
+	require.Equal(t, 3, len(events))
+
+	// Both cycle members are visited and each has a count, even though they
+	// are not reachable from the forest root.
+	x := findEventBySpanID(events, "x")
+	y := findEventBySpanID(events, "y")
+	require.NotNil(t, x)
+	require.NotNil(t, y)
+	// At least one of x/y must have a count > 0 — the unvisited-island pass
+	// picks a starting node and treats the cycle as its own tree.
+	xCount, _ := x.Data.Get("self").(int64)
+	yCount, _ := y.Data.Get("self").(int64)
+	assert.GreaterOrEqual(t, xCount, int64(1))
+	assert.GreaterOrEqual(t, yCount, int64(1))
+}
+
+// TestCustomSpanCounts_Scoped_SelfLoopDefense verifies that a span whose
+// parent ID equals its own span ID is treated as a forest root and counted
+// once (its own contribution).
+func TestCustomSpanCounts_Scoped_SelfLoopDefense(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "self",
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "trace.span_id", Operator: config.Exists},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "self-loop"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "loopy",
+		"trace.parent_id": "loopy",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(2)
+	require.Equal(t, 2, len(events))
+	assert.Equal(t, int64(1), findEventBySpanID(events, "loopy").Data.Get("self"))
+}
+
+// TestCustomSpanCounts_Scoped_SpanIDCollision verifies that two spans with
+// the same span ID don't panic and the span_counter_id_collision metric is
+// incremented.
+func TestCustomSpanCounts_Scoped_SpanIDCollision(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "subtree",
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "trace.span_id", Operator: config.Exists},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+	m := coll.Metrics.(*metrics.MockMetrics)
+
+	traceID := "id-collision"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "dup",
+		"trace.parent_id": "s0",
+	})
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "dup", // same ID as the previous one
+		"trace.parent_id": "s0",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(3)
+	require.Equal(t, 3, len(events))
+	assert.GreaterOrEqual(t, m.CounterIncrements["span_counter_id_collision"], int64(1),
+		"collision metric should be incremented at least once")
+}
+
+// TestCustomSpanCounts_BackwardsCompat_FastPath verifies that with no
+// ScopeConditions configured the fast path emits the same trace-wide total
+// on the root span as before — bit-for-bit identical to the original
+// behavior.
+func TestCustomSpanCounts_BackwardsCompat_FastPath(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key: "db",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "backwards-compat"
+	for i := 0; i < 3; i++ {
+		addPeerSpan(t, coll, traceID, map[string]any{
+			"trace.span_id":   fmt.Sprintf("c%d", i),
+			"trace.parent_id": "s0",
+			"name":            "db.query",
+		})
+	}
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c3",
+		"trace.parent_id": "s0",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(5)
+	require.Equal(t, 5, len(events))
+
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(3), root.Data.Get("db"))
+	for _, id := range []string{"c0", "c1", "c2", "c3"} {
+		ev := findEventBySpanID(events, id)
+		require.NotNil(t, ev)
+		assert.Nil(t, ev.Data.Get("db"), "child span should not carry the counter on the fast path")
+	}
 }
 
 // BenchmarkCollectorWithSamplers runs benchmarks for different sampler configurations.
@@ -2478,4 +3045,149 @@ func (c *mockSender) waitForCount(target int) {
 			}
 		}
 	}
+}
+
+// makeBenchmarkTrace builds a synthetic 2,868-span trace shaped like a typical
+// resolver-heavy graphql workload: 1 root, `anchorCount` resolver spans that
+// satisfy the scoped tests' ScopeConditions, and the remainder distributed as
+// "db.query" children under the resolvers (plus filler).
+//
+// The Refinery payload is constructed via types.NewPayload so MemoizeFields
+// behaves the same as in production.
+func makeBenchmarkTrace(cfg config.Config, totalSpans, anchorCount int) *types.Trace {
+	traceID := "bench"
+	trace := &types.Trace{
+		TraceID:     traceID,
+		Dataset:     "bench",
+		APIKey:      legacyAPIKey,
+		ArrivalTime: time.Now(),
+	}
+
+	root := &types.Span{
+		TraceID: traceID,
+		IsRoot:  true,
+		Event: &types.Event{
+			Dataset: "bench",
+			Data: types.NewPayload(cfg, map[string]any{
+				"trace.span_id": "s0",
+			}),
+			APIKey: legacyAPIKey,
+		},
+	}
+	trace.AddSpan(root)
+	trace.RootSpan = root
+
+	anchors := make([]string, 0, anchorCount)
+	for a := 0; a < anchorCount; a++ {
+		anchorID := fmt.Sprintf("a%d", a)
+		anchors = append(anchors, anchorID)
+		trace.AddSpan(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "bench",
+				Data: types.NewPayload(cfg, map[string]any{
+					"trace.span_id":          anchorID,
+					"trace.parent_id":        "s0",
+					"graphql.operation.name": fmt.Sprintf("Query%d", a),
+				}),
+				APIKey: legacyAPIKey,
+			},
+		})
+	}
+
+	added := 1 + anchorCount
+	i := 0
+	for added < totalSpans {
+		anchorID := anchors[i%len(anchors)]
+		trace.AddSpan(&types.Span{
+			TraceID: traceID,
+			Event: &types.Event{
+				Dataset: "bench",
+				Data: types.NewPayload(cfg, map[string]any{
+					"trace.span_id":   fmt.Sprintf("d%d", added),
+					"trace.parent_id": anchorID,
+					"name":            "db.query",
+				}),
+				APIKey: legacyAPIKey,
+			},
+		})
+		added++
+		i++
+	}
+	return trace
+}
+
+// makeBenchmarkCollector constructs a minimal InMemCollector bypassing the
+// usual Start() machinery — we only need the fields touched by
+// computeCustomCounts. Counters are initialized in place.
+func makeBenchmarkCollector(b *testing.B, counters []config.SpanCounter) *InMemCollector {
+	for j := range counters {
+		require.NoError(b, counters[j].Init())
+	}
+	conf := customCountConf(counters)
+	m := &metrics.MockMetrics{}
+	m.Start()
+	c := &InMemCollector{
+		Config:       conf,
+		Metrics:      m,
+		spanCounters: counters,
+	}
+	return c
+}
+
+func benchmarkComputeCustomCounts(b *testing.B, counters []config.SpanCounter) {
+	c := makeBenchmarkCollector(b, counters)
+	trace := makeBenchmarkTrace(c.Config, 2868, 5)
+	st := sendableTrace{Trace: trace}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = c.computeCustomCounts(st)
+	}
+}
+
+// BenchmarkComputeCustomCounts_NoScope exercises the fast path: a single
+// unscoped counter on a 2,868-span trace. Should track today's
+// implementation's cost (no DFS, no index).
+func BenchmarkComputeCustomCounts_NoScope(b *testing.B) {
+	counters := []config.SpanCounter{{
+		Key: "db",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+	}}
+	benchmarkComputeCustomCounts(b, counters)
+}
+
+// BenchmarkComputeCustomCounts_Scoped exercises the scoped path: one scoped
+// counter with 5 anchors on a 2,868-span trace.
+func BenchmarkComputeCustomCounts_Scoped(b *testing.B) {
+	counters := []config.SpanCounter{{
+		Key: "db",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+	}}
+	benchmarkComputeCustomCounts(b, counters)
+}
+
+// BenchmarkComputeCustomCounts_ScopedMulti exercises the per-counter loop in
+// the write pass: 5 scoped counters, each with 5 anchors, on a 2,868-span
+// trace.
+func BenchmarkComputeCustomCounts_ScopedMulti(b *testing.B) {
+	counters := make([]config.SpanCounter, 5)
+	for i := range counters {
+		counters[i] = config.SpanCounter{
+			Key: fmt.Sprintf("k%d", i),
+			Conditions: []*config.RulesBasedSamplerCondition{
+				{Field: "name", Operator: config.EQ, Value: "db.query"},
+			},
+			ScopeConditions: []*config.RulesBasedSamplerCondition{
+				{Field: "graphql.operation.name", Operator: config.Exists},
+			},
+		}
+	}
+	benchmarkComputeCustomCounts(b, counters)
 }

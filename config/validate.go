@@ -660,6 +660,7 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 					Severity: Error,
 				})
 			} else {
+				seenKeys := make(map[string]int, len(arr))
 				for i, entry := range arr {
 					if entryMap, ok := entry.(map[string]any); ok {
 						rulesmap := map[string]any{"SpanCounters": entryMap}
@@ -670,6 +671,7 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 								Severity: result.Severity,
 							})
 						}
+						results = append(results, validateSpanCounterEntry(i, entryMap, seenKeys)...)
 					} else {
 						results = append(results, ValidationResult{
 							Message:  fmt.Sprintf("SpanCounters[%d] must be an object, but %v is %T", i, entry, entry),
@@ -716,6 +718,67 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 			results = append(results, ValidationResult{
 				Message:  fmt.Sprintf("Within sampler %s: %s", k, result.Message),
 				Severity: result.Severity,
+			})
+		}
+	}
+
+	return results
+}
+
+// validateSpanCounterEntry runs the custom-rule validations on a single
+// SpanCounter entry: no-op detection (empty ScopeConditions with
+// EmitTotalOnRoot=false), Key uniqueness, reserved-namespace check on Key,
+// and rejection of the trace-level HasRootSpan operator inside
+// ScopeConditions. seenKeys tracks Keys already observed in this list and
+// is updated in place.
+func validateSpanCounterEntry(idx int, entry map[string]any, seenKeys map[string]int) ValidationResults {
+	var results ValidationResults
+
+	keyStr, _ := entry["Key"].(string)
+	if keyStr != "" {
+		if prev, exists := seenKeys[keyStr]; exists {
+			results = append(results, ValidationResult{
+				Message:  fmt.Sprintf("SpanCounters[%d]: duplicate Key %q (also declared at SpanCounters[%d])", idx, keyStr, prev),
+				Severity: Error,
+			})
+		} else {
+			seenKeys[keyStr] = idx
+		}
+		if strings.HasPrefix(keyStr, "meta.refinery.") {
+			results = append(results, ValidationResult{
+				Message:  fmt.Sprintf("SpanCounters[%d]: Key %q uses the reserved meta.refinery. namespace", idx, keyStr),
+				Severity: Error,
+			})
+		} else if strings.HasPrefix(keyStr, "meta.") {
+			results = append(results, ValidationResult{
+				Message:  fmt.Sprintf("SpanCounters[%d]: Key %q starts with meta.; int fields with value 0 cannot be distinguished from missing", idx, keyStr),
+				Severity: Warning,
+			})
+		}
+	}
+
+	scope, hasScope := entry["ScopeConditions"]
+	scopeArr, _ := scope.([]any)
+	scopeIsEmpty := !hasScope || len(scopeArr) == 0
+
+	if v, ok := entry["EmitTotalOnRoot"]; ok {
+		if emit, ok := v.(bool); ok && !emit && scopeIsEmpty {
+			results = append(results, ValidationResult{
+				Message:  fmt.Sprintf("SpanCounters[%d]: EmitTotalOnRoot=false with no ScopeConditions disables all writes for this counter", idx),
+				Severity: Warning,
+			})
+		}
+	}
+
+	for ci, cond := range scopeArr {
+		condMap, ok := cond.(map[string]any)
+		if !ok {
+			continue
+		}
+		if op, ok := condMap["Operator"].(string); ok && op == HasRootSpan {
+			results = append(results, ValidationResult{
+				Message:  fmt.Sprintf("SpanCounters[%d].ScopeConditions[%d]: operator %q is trace-level and cannot be used as a span filter", idx, ci, HasRootSpan),
+				Severity: Error,
 			})
 		}
 	}

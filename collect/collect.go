@@ -164,6 +164,7 @@ var inMemCollectorMetrics = []metrics.Metadata{
 	{Name: "collector_outgoing_queue", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "number of traces waiting to be send to upstream"},
 	{Name: "collector_cache_eviction", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of times cache eviction has occurred"},
 	{Name: "collector_num_workers", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "number of collector workers"},
+	{Name: "span_counter_id_collision", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of times two spans in the same trace share a span ID while computing scoped SpanCounters"},
 }
 
 func (i *InMemCollector) Start() error {
@@ -743,9 +744,25 @@ func findSuitableRootSpan(t sendableTrace) *types.Span {
 	return best
 }
 
-// computeCustomCounts computes each counter's value by iterating all spans in the trace
-// and attaches the results to the root span.
-// Returns nil, nil if there are no counters configured or no suitable target span.
+// customCountWrite is a single counter-keyed write destined for one span.
+type customCountWrite struct {
+	key   string
+	value int64
+}
+
+// computeCustomCounts computes each configured SpanCounter and returns the
+// per-span attribute writes the caller should apply.
+//
+// Returns nil if there are no counters configured or no spans to count.
+//
+// Fast path: when no counter has ScopeConditions, run a single linear scan
+// over the spans and write the trace-wide total to the root span — identical
+// to the original behavior, with no index, DFS, or per-span storage.
+//
+// Scoped path (engaged when at least one counter has ScopeConditions): build a
+// parent->children index, run iterative post-order DFS from each forest root
+// (and any unvisited orphan island) to compute per-span subtree counts, then
+// emit per-anchor writes plus an optional trace-wide total on the root.
 //
 // Stress relief note: this runs inside sendTraces(), the sole consumer of the
 // tracesToSend channel. Work is O(N×M) — N spans × M counters — so large
@@ -756,31 +773,228 @@ func findSuitableRootSpan(t sendableTrace) *types.Span {
 // processed via ProcessSpanImmediately (the stress-relief fast path) bypass the
 // trace buffer entirely and never reach sendTraces, so custom counts are not
 // computed or attached to stress-sampled traces.
-func (i *InMemCollector) computeCustomCounts(t sendableTrace) (*types.Span, map[string]int64) {
+func (i *InMemCollector) computeCustomCounts(t sendableTrace) map[*types.Span][]customCountWrite {
 	i.mutex.RLock()
 	counters := i.spanCounters
 	i.mutex.RUnlock()
 
 	if len(counters) == 0 {
-		return nil, nil
+		return nil
 	}
 
-	targetSpan := findSuitableRootSpan(t)
-	if targetSpan == nil {
-		return nil, nil
+	spans := t.GetSpans()
+	if len(spans) == 0 {
+		return nil
 	}
 
-	var rootData config.SpanData = &targetSpan.Data
-	counts := make(map[string]int64, len(counters))
-	for _, sp := range t.GetSpans() {
-		for _, counter := range counters {
-			if counter.MatchesSpan(&sp.Data, rootData) {
-				counts[counter.Key]++
-			}
+	rootSpan := findSuitableRootSpan(t)
+	var rootData config.SpanData
+	if rootSpan != nil {
+		rootData = &rootSpan.Data
+	}
+
+	anyScoped := false
+	for _, c := range counters {
+		if len(c.ScopeConditions) > 0 {
+			anyScoped = true
+			break
+		}
+	}
+	if !anyScoped {
+		return computeCustomCountsLinear(spans, counters, rootSpan, rootData)
+	}
+
+	spanIDFields := i.Config.GetSpanIdFieldNames()
+	parentIDFields := i.Config.GetParentIdFieldNames()
+	memoFields := make([]string, 0, len(spanIDFields)+len(parentIDFields))
+	memoFields = append(memoFields, spanIDFields...)
+	memoFields = append(memoFields, parentIDFields...)
+	for _, sp := range spans {
+		sp.Data.MemoizeFields(memoFields...)
+	}
+
+	childrenByIndex, forestRoots := buildSpanIndex(spans, spanIDFields, parentIDFields, i.Metrics)
+
+	M := len(counters)
+	counts := make([]int64, len(spans)*M)
+	visited := make([]bool, len(spans))
+
+	for _, ri := range forestRoots {
+		aggregateSubtree(ri, spans, childrenByIndex, counters, rootData, counts, visited, M)
+	}
+	for idx := range visited {
+		if !visited[idx] {
+			aggregateSubtree(idx, spans, childrenByIndex, counters, rootData, counts, visited, M)
 		}
 	}
 
-	return targetSpan, counts
+	emissions := make(map[*types.Span][]customCountWrite)
+	for c, counter := range counters {
+		if len(counter.ScopeConditions) > 0 {
+			for si, sp := range spans {
+				if counter.MatchesScope(&sp.Data, rootData) {
+					emissions[sp] = append(emissions[sp], customCountWrite{counter.Key, counts[si*M+c]})
+				}
+			}
+		}
+		if counter.ShouldEmitTotalOnRoot() && rootSpan != nil {
+			var total int64
+			if len(counter.ScopeConditions) > 0 {
+				for _, ri := range forestRoots {
+					total += counts[ri*M+c]
+				}
+			} else {
+				for si := range spans {
+					total += counts[si*M+c]
+				}
+			}
+			emissions[rootSpan] = append(emissions[rootSpan], customCountWrite{counter.Key, total})
+		}
+	}
+
+	return emissions
+}
+
+// computeCustomCountsLinear implements the unscoped fast path: a single linear
+// pass over spans accumulating one int64 per counter, written to the root.
+func computeCustomCountsLinear(spans []*types.Span, counters []config.SpanCounter, rootSpan *types.Span, rootData config.SpanData) map[*types.Span][]customCountWrite {
+	if rootSpan == nil {
+		return nil
+	}
+	totals := make([]int64, len(counters))
+	for _, sp := range spans {
+		for c, counter := range counters {
+			if counter.MatchesSpan(&sp.Data, rootData) {
+				totals[c]++
+			}
+		}
+	}
+	writes := make([]customCountWrite, 0, len(counters))
+	for c, counter := range counters {
+		writes = append(writes, customCountWrite{counter.Key, totals[c]})
+	}
+	return map[*types.Span][]customCountWrite{rootSpan: writes}
+}
+
+// spanIDFromPayload reads the first present configured ID field and narrows
+// it to a string. Returns ("", false) for missing/empty IDs and for types
+// other than string/[]byte — such spans become leaf-only in the index.
+func spanIDFromPayload(p config.SpanData, fields []string) (string, bool) {
+	for _, f := range fields {
+		if !p.Exists(f) {
+			continue
+		}
+		switch v := p.Get(f).(type) {
+		case string:
+			if v == "" {
+				return "", false
+			}
+			return v, true
+		case []byte:
+			if len(v) == 0 {
+				return "", false
+			}
+			return string(v), true
+		}
+		return "", false
+	}
+	return "", false
+}
+
+// buildSpanIndex constructs the parent->children index used by the scoped
+// aggregation pass. childrenByIndex[i] holds the span indices of span i's
+// children, indexed for O(1) DFS lookups (no string keys in the hot path).
+// forestRoots holds the indices of spans with no parent or whose parent ID
+// is not present in this trace; self-loops are also routed through
+// forestRoots so the cycle-defense pass guarantees visitation. Collisions
+// on span ID are logged via the span_counter_id_collision metric and
+// resolved last-write-wins.
+func buildSpanIndex(spans []*types.Span, spanIDFields, parentIDFields []string, m metrics.Metrics) ([][]int, []int) {
+	idToIndex := make(map[string]int, len(spans))
+	for i, sp := range spans {
+		id, ok := spanIDFromPayload(&sp.Data, spanIDFields)
+		if !ok {
+			continue
+		}
+		if _, exists := idToIndex[id]; exists {
+			if m != nil {
+				m.Increment("span_counter_id_collision")
+			}
+		}
+		idToIndex[id] = i
+	}
+
+	childrenByIndex := make([][]int, len(spans))
+	var forestRoots []int
+	for i, sp := range spans {
+		parentID, parentOk := spanIDFromPayload(&sp.Data, parentIDFields)
+		if !parentOk {
+			forestRoots = append(forestRoots, i)
+			continue
+		}
+		parentIdx, parentInTrace := idToIndex[parentID]
+		if !parentInTrace || parentIdx == i {
+			forestRoots = append(forestRoots, i)
+			continue
+		}
+		childrenByIndex[parentIdx] = append(childrenByIndex[parentIdx], i)
+	}
+	return childrenByIndex, forestRoots
+}
+
+// aggregateSubtree runs iterative post-order DFS from rootIndex, populating
+// counts[span*M+c] with each counter's subtree count (children's sums plus 1
+// for each counter whose Conditions match the span itself). visited gates
+// re-entry so cycles terminate; M is the per-span counter stride.
+func aggregateSubtree(
+	rootIndex int,
+	spans []*types.Span,
+	childrenByIndex [][]int,
+	counters []config.SpanCounter,
+	rootData config.SpanData,
+	counts []int64,
+	visited []bool,
+	M int,
+) {
+	if visited[rootIndex] {
+		return
+	}
+	type frame struct {
+		spanIndex   int
+		childCursor int
+	}
+	stack := []frame{{spanIndex: rootIndex, childCursor: 0}}
+	visited[rootIndex] = true
+
+	for len(stack) > 0 {
+		top := &stack[len(stack)-1]
+		children := childrenByIndex[top.spanIndex]
+		if top.childCursor < len(children) {
+			childIdx := children[top.childCursor]
+			top.childCursor++
+			if visited[childIdx] {
+				continue
+			}
+			visited[childIdx] = true
+			stack = append(stack, frame{spanIndex: childIdx, childCursor: 0})
+			continue
+		}
+
+		sp := spans[top.spanIndex]
+		base := top.spanIndex * M
+		for c, counter := range counters {
+			if counter.MatchesSpan(&sp.Data, rootData) {
+				counts[base+c] = 1
+			}
+		}
+		for _, childIdx := range children {
+			cbase := childIdx * M
+			for c := range counters {
+				counts[base+c] += counts[cbase+c]
+			}
+		}
+		stack = stack[:len(stack)-1]
+	}
 }
 
 func (i *InMemCollector) sendTraces() {
@@ -790,7 +1004,7 @@ func (i *InMemCollector) sendTraces() {
 		i.Metrics.Histogram("collector_outgoing_queue", float64(len(i.tracesToSend)))
 		_, span := otelutil.StartSpanMulti(context.Background(), i.Tracer, "sendTrace", map[string]interface{}{"num_spans": t.DescendantCount(), "tracesToSend_size": len(i.tracesToSend)})
 
-		customCountTarget, customCounts := i.computeCustomCounts(t)
+		customCounts := i.computeCustomCounts(t)
 
 		for _, sp := range t.GetSpans() {
 
@@ -815,11 +1029,8 @@ func (i *InMemCollector) sendTraces() {
 				}
 			}
 
-			// set custom span counts on the target span (root if present, else best fallback)
-			if sp == customCountTarget {
-				for k, v := range customCounts {
-					sp.Data.Set(k, v)
-				}
+			for _, w := range customCounts[sp] {
+				sp.Data.Set(w.key, w.value)
 			}
 
 			isDryRun := i.Config.GetIsDryRun()

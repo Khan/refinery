@@ -165,6 +165,8 @@ type Config interface {
 
 	GetParentIdFieldNames() []string
 
+	GetSpanIdFieldNames() []string
+
 	GetOpAMPConfig() OpAMPConfig
 }
 
