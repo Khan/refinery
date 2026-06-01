@@ -382,6 +382,31 @@ func TestShouldEmitTotalOnRoot_ExplicitOverride(t *testing.T) {
 	assert.False(t, c.ShouldEmitTotalOnRoot())
 }
 
+func TestEffectiveRootKey(t *testing.T) {
+	// Unscoped + no RootKey → Key (today's behavior).
+	c := SpanCounter{Key: "k"}
+	assert.Equal(t, "k", c.EffectiveRootKey())
+
+	// Unscoped + RootKey set → still Key; RootKey is ignored when unscoped.
+	c = SpanCounter{Key: "k", RootKey: "rk"}
+	assert.Equal(t, "k", c.EffectiveRootKey())
+
+	// Scoped + no RootKey → Key (per-anchor and root share the same name).
+	c = SpanCounter{
+		Key:             "k",
+		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
+	}
+	assert.Equal(t, "k", c.EffectiveRootKey())
+
+	// Scoped + RootKey set → RootKey overrides the root write.
+	c = SpanCounter{
+		Key:             "anchor_count",
+		RootKey:         "trace_count",
+		ScopeConditions: []*RulesBasedSamplerCondition{cond("anchor", Exists, nil)},
+	}
+	assert.Equal(t, "trace_count", c.EffectiveRootKey())
+}
+
 // ----------------------------------------------------------------------------
 // validateSpanCounterEntry (custom rules)
 // ----------------------------------------------------------------------------
@@ -393,7 +418,58 @@ func TestValidateSpanCounterEntry_DuplicateKey(t *testing.T) {
 	results = validateSpanCounterEntry(1, map[string]any{"Key": "k"}, seen)
 	require.Len(t, results, 1)
 	assert.Equal(t, Error, results[0].Severity)
-	assert.Contains(t, results[0].Message, "duplicate Key")
+	assert.Contains(t, results[0].Message, "collides")
+}
+
+func TestValidateSpanCounterEntry_RootKeyCollidesWithKey(t *testing.T) {
+	seen := map[string]int{}
+	// Counter 0 declares Key="shared".
+	results := validateSpanCounterEntry(0, map[string]any{"Key": "shared"}, seen)
+	assert.Empty(t, results)
+	// Counter 1 declares RootKey="shared" → collision with counter 0's Key.
+	results = validateSpanCounterEntry(1, map[string]any{
+		"Key":     "other",
+		"RootKey": "shared",
+		"ScopeConditions": []any{
+			map[string]any{"Field": "x", "Operator": "exists"},
+		},
+	}, seen)
+	require.NotEmpty(t, results)
+	var sawErr bool
+	for _, r := range results {
+		if r.Severity == Error && strings.Contains(r.Message, "RootKey") && strings.Contains(r.Message, "collides") {
+			sawErr = true
+		}
+	}
+	assert.True(t, sawErr, "RootKey colliding with another counter's Key must error")
+}
+
+func TestValidateSpanCounterEntry_RootKeyWithoutScopeWarns(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{
+		"Key":     "k",
+		"RootKey": "rk",
+	}, seen)
+	require.NotEmpty(t, results)
+	var sawWarn bool
+	for _, r := range results {
+		if r.Severity == Warning && strings.Contains(r.Message, "RootKey") && strings.Contains(r.Message, "ignored") {
+			sawWarn = true
+		}
+	}
+	assert.True(t, sawWarn, "RootKey without ScopeConditions must warn")
+}
+
+func TestValidateSpanCounterEntry_RootKeyEqualToKeyIsNoop(t *testing.T) {
+	seen := map[string]int{}
+	results := validateSpanCounterEntry(0, map[string]any{
+		"Key":     "k",
+		"RootKey": "k",
+		"ScopeConditions": []any{
+			map[string]any{"Field": "x", "Operator": "exists"},
+		},
+	}, seen)
+	assert.Empty(t, results, "RootKey == Key is harmless and emits no diagnostics")
 }
 
 func TestValidateSpanCounterEntry_ReservedNamespace(t *testing.T) {

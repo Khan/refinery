@@ -2317,6 +2317,90 @@ func TestCustomSpanCounts_Scoped_EmitTotalOnRoot(t *testing.T) {
 	assert.Equal(t, int64(12), root.Data.Get("db_call_count"), "root should get trace-wide total")
 }
 
+// TestCustomSpanCounts_Scoped_RootKey verifies that when both
+// ScopeConditions and RootKey are set, the per-anchor writes use Key and
+// the root's trace-wide total uses RootKey — landing on a separate field
+// so the two counts can be queried independently.
+func TestCustomSpanCounts_Scoped_RootKey(t *testing.T) {
+	emitTrue := true
+	counters := []config.SpanCounter{{
+		Key:     "resolver_db_count",
+		RootKey: "trace_db_count",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+		ScopeConditions: []*config.RulesBasedSamplerCondition{
+			{Field: "graphql.operation.name", Operator: config.Exists},
+		},
+		EmitTotalOnRoot: &emitTrue,
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "rootkey"
+	for r := 1; r <= 2; r++ {
+		resolverID := fmt.Sprintf("r%d", r)
+		addPeerSpan(t, coll, traceID, map[string]any{
+			"trace.span_id":          resolverID,
+			"trace.parent_id":        "s0",
+			"graphql.operation.name": fmt.Sprintf("Query%d", r),
+		})
+		for d := 0; d < 3; d++ {
+			addPeerSpan(t, coll, traceID, map[string]any{
+				"trace.span_id":   fmt.Sprintf("db%d%d", r, d),
+				"trace.parent_id": resolverID,
+				"name":            "db.query",
+			})
+		}
+	}
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(9)
+	require.Equal(t, 9, len(events))
+
+	for r := 1; r <= 2; r++ {
+		ev := findEventBySpanID(events, fmt.Sprintf("r%d", r))
+		require.NotNil(t, ev)
+		assert.Equal(t, int64(3), ev.Data.Get("resolver_db_count"), "anchor gets Key")
+		assert.Nil(t, ev.Data.Get("trace_db_count"), "anchor does not get RootKey")
+	}
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(6), root.Data.Get("trace_db_count"), "root gets RootKey for total")
+	assert.Nil(t, root.Data.Get("resolver_db_count"), "root does not get Key when RootKey overrides")
+}
+
+// TestCustomSpanCounts_Unscoped_RootKeyIgnored verifies that RootKey on an
+// unscoped counter (no ScopeConditions) is ignored — the root still gets
+// Key, preserving today's behavior.
+func TestCustomSpanCounts_Unscoped_RootKeyIgnored(t *testing.T) {
+	counters := []config.SpanCounter{{
+		Key:     "k",
+		RootKey: "rk",
+		Conditions: []*config.RulesBasedSamplerCondition{
+			{Field: "name", Operator: config.EQ, Value: "db.query"},
+		},
+	}}
+	coll := newTestCollector(t, customCountConf(counters))
+	transmission := coll.Transmission.(*transmit.MockTransmission)
+
+	traceID := "rootkey-ignored"
+	addPeerSpan(t, coll, traceID, map[string]any{
+		"trace.span_id":   "c1",
+		"trace.parent_id": "s0",
+		"name":            "db.query",
+	})
+	addRootSpan(t, coll, traceID, map[string]any{"trace.span_id": "s0"})
+
+	events := transmission.GetBlock(2)
+	require.Equal(t, 2, len(events))
+
+	root := findEventBySpanID(events, "s0")
+	require.NotNil(t, root)
+	assert.Equal(t, int64(1), root.Data.Get("k"), "unscoped counter writes Key to root")
+	assert.Nil(t, root.Data.Get("rk"), "RootKey is ignored when ScopeConditions is empty")
+}
+
 // TestCustomSpanCounts_Scoped_NestedAnchors verifies that an outer anchor's
 // count includes the inner anchor's subtree (no special-casing of nested
 // anchors).

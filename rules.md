@@ -3,7 +3,7 @@
 # Honeycomb Refinery Rules Documentation
 
 This is the documentation for the rules configuration for Honeycomb's Refinery.
-It was automatically generated on 2026-05-27 at 17:33:09 UTC.
+It was automatically generated on 2026-06-01 at 18:46:18 UTC.
 
 ## The Rules file
 
@@ -731,8 +731,18 @@ If no root span exists when the trace is sent, root writes go to the first non-a
 
 The name of the field that will be added to each target span.
 Must not be empty.
+When `ScopeConditions` is set, this is the field written to each anchor span; when unset (the original behavior), this is the field written to the root span.
 Keys in the `meta.refinery.` namespace are reserved for Refinery's own metadata and are rejected at validation.
 Keys starting with `meta.` produce a warning, because int fields with a value of `0` cannot be distinguished from a missing field on the wire — meaning zero-count anchors will appear absent to downstream queries.
+
+Type: `string`
+
+### `RootKey`
+
+When set together with `ScopeConditions`, the trace-wide total on the root span is written under `RootKey` instead of `Key`.
+This lets per-anchor counts and the trace-wide total land on different attribute names so they can be queried independently.
+Ignored (with a validation warning) when `ScopeConditions` is empty — unscoped counters always write `Key` to the root.
+Subject to the same reserved-namespace rules as `Key` and counts as a separate field for cross-counter uniqueness checks.
 
 Type: `string`
 

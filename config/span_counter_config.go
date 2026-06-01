@@ -20,6 +20,7 @@ type SpanData interface {
 // controls whether the trace-wide total is additionally written to the root.
 type SpanCounter struct {
 	Key             string                        `yaml:"Key"`
+	RootKey         string                        `yaml:"RootKey,omitempty"`
 	Conditions      []*RulesBasedSamplerCondition `yaml:"Conditions,omitempty"`
 	ScopeConditions []*RulesBasedSamplerCondition `yaml:"ScopeConditions,omitempty"`
 	EmitTotalOnRoot *bool                         `yaml:"EmitTotalOnRoot,omitempty"`
@@ -66,6 +67,18 @@ func (c *SpanCounter) ShouldEmitTotalOnRoot() bool {
 		return *c.EmitTotalOnRoot
 	}
 	return len(c.ScopeConditions) == 0
+}
+
+// EffectiveRootKey returns the field name to use when writing the trace-wide
+// total to the root span. When ScopeConditions is set and RootKey is
+// non-empty, RootKey is used so the per-anchor and per-trace counts land on
+// separate field names. Otherwise (unscoped, or scoped with no RootKey
+// override) the root write uses Key, preserving today's behavior.
+func (c *SpanCounter) EffectiveRootKey() string {
+	if len(c.ScopeConditions) > 0 && c.RootKey != "" {
+		return c.RootKey
+	}
+	return c.Key
 }
 
 func evaluateConditions(conditions []*RulesBasedSamplerCondition, span SpanData, root SpanData) bool {

@@ -848,7 +848,7 @@ func (i *InMemCollector) computeCustomCounts(t sendableTrace) map[*types.Span][]
 					total += counts[si*M+c]
 				}
 			}
-			emissions[rootSpan] = append(emissions[rootSpan], customCountWrite{counter.Key, total})
+			emissions[rootSpan] = append(emissions[rootSpan], customCountWrite{counter.EffectiveRootKey(), total})
 		}
 	}
 

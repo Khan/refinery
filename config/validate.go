@@ -727,39 +727,32 @@ func (m *Metadata) ValidateRules(data map[string]any) ValidationResults {
 
 // validateSpanCounterEntry runs the custom-rule validations on a single
 // SpanCounter entry: no-op detection (empty ScopeConditions with
-// EmitTotalOnRoot=false), Key uniqueness, reserved-namespace check on Key,
-// and rejection of the trace-level HasRootSpan operator inside
-// ScopeConditions. seenKeys tracks Keys already observed in this list and
-// is updated in place.
+// EmitTotalOnRoot=false), Key/RootKey uniqueness across all written field
+// names, reserved-namespace checks on Key/RootKey, RootKey-without-scope
+// warning, and rejection of the trace-level HasRootSpan operator inside
+// ScopeConditions. seenKeys tracks every written field name already seen in
+// this counter list and is updated in place.
 func validateSpanCounterEntry(idx int, entry map[string]any, seenKeys map[string]int) ValidationResults {
 	var results ValidationResults
-
-	keyStr, _ := entry["Key"].(string)
-	if keyStr != "" {
-		if prev, exists := seenKeys[keyStr]; exists {
-			results = append(results, ValidationResult{
-				Message:  fmt.Sprintf("SpanCounters[%d]: duplicate Key %q (also declared at SpanCounters[%d])", idx, keyStr, prev),
-				Severity: Error,
-			})
-		} else {
-			seenKeys[keyStr] = idx
-		}
-		if strings.HasPrefix(keyStr, "meta.refinery.") {
-			results = append(results, ValidationResult{
-				Message:  fmt.Sprintf("SpanCounters[%d]: Key %q uses the reserved meta.refinery. namespace", idx, keyStr),
-				Severity: Error,
-			})
-		} else if strings.HasPrefix(keyStr, "meta.") {
-			results = append(results, ValidationResult{
-				Message:  fmt.Sprintf("SpanCounters[%d]: Key %q starts with meta.; int fields with value 0 cannot be distinguished from missing", idx, keyStr),
-				Severity: Warning,
-			})
-		}
-	}
 
 	scope, hasScope := entry["ScopeConditions"]
 	scopeArr, _ := scope.([]any)
 	scopeIsEmpty := !hasScope || len(scopeArr) == 0
+
+	keyStr, _ := entry["Key"].(string)
+	rootKeyStr, _ := entry["RootKey"].(string)
+
+	results = append(results, validateSpanCounterFieldName(idx, "Key", keyStr, seenKeys)...)
+	if rootKeyStr != "" && rootKeyStr != keyStr {
+		results = append(results, validateSpanCounterFieldName(idx, "RootKey", rootKeyStr, seenKeys)...)
+	}
+
+	if rootKeyStr != "" && scopeIsEmpty {
+		results = append(results, ValidationResult{
+			Message:  fmt.Sprintf("SpanCounters[%d]: RootKey is set but ScopeConditions is empty; RootKey is ignored — the root write uses Key", idx),
+			Severity: Warning,
+		})
+	}
 
 	if v, ok := entry["EmitTotalOnRoot"]; ok {
 		if emit, ok := v.(bool); ok && !emit && scopeIsEmpty {
@@ -783,5 +776,35 @@ func validateSpanCounterEntry(idx int, entry map[string]any, seenKeys map[string
 		}
 	}
 
+	return results
+}
+
+// validateSpanCounterFieldName checks one written-field-name (Key or
+// RootKey) for cross-counter uniqueness and reserved-namespace violations.
+// seenKeys is updated in place.
+func validateSpanCounterFieldName(idx int, fieldLabel, name string, seenKeys map[string]int) ValidationResults {
+	if name == "" {
+		return nil
+	}
+	var results ValidationResults
+	if prev, exists := seenKeys[name]; exists && prev != idx {
+		results = append(results, ValidationResult{
+			Message:  fmt.Sprintf("SpanCounters[%d]: %s %q collides with a Key or RootKey already declared at SpanCounters[%d]", idx, fieldLabel, name, prev),
+			Severity: Error,
+		})
+	} else {
+		seenKeys[name] = idx
+	}
+	if strings.HasPrefix(name, "meta.refinery.") {
+		results = append(results, ValidationResult{
+			Message:  fmt.Sprintf("SpanCounters[%d]: %s %q uses the reserved meta.refinery. namespace", idx, fieldLabel, name),
+			Severity: Error,
+		})
+	} else if strings.HasPrefix(name, "meta.") {
+		results = append(results, ValidationResult{
+			Message:  fmt.Sprintf("SpanCounters[%d]: %s %q starts with meta.; int fields with value 0 cannot be distinguished from missing", idx, fieldLabel, name),
+			Severity: Warning,
+		})
+	}
 	return results
 }
