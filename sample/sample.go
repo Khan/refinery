@@ -3,6 +3,7 @@ package sample
 import (
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 
@@ -24,6 +25,15 @@ type CanSetGoalThroughputPerSec interface {
 	SetGoalThroughputPerSec(int)
 }
 
+type sharedDynsamplerEntry struct {
+	dynsampler any
+	recorder   *dynsamplerMetricsRecorder
+}
+
+var samplerFactoryMetrics = []metrics.Metadata{
+	{Name: "unique_dynsampler_count", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "Number of unique dynsampler-go samplers created"},
+}
+
 // SamplerFactory is used to create new samplers with common (injected) resources
 type SamplerFactory struct {
 	Config    config.Config   `inject:""`
@@ -33,8 +43,8 @@ type SamplerFactory struct {
 	peerCount int
 	mutex     sync.Mutex
 
-	// Shared dynsampler instances to maintain global throughput tracking
-	sharedDynsamplers map[string]any
+	// Shared dynsampler instances and their metrics recorders, keyed identically to avoid N×overcounting
+	sharedDynsamplers map[string]sharedDynsamplerEntry
 
 	// Store original GoalThroughputPerSec values for cluster size calculations.
 	// We need this to recalculate goal throughput values when the cluster size
@@ -55,8 +65,8 @@ func (s *SamplerFactory) updatePeerCounts() {
 	}
 
 	// Update goal throughput for all throughput-based dynsamplers
-	for dynsamplerKey, dynsamplerInstance := range s.sharedDynsamplers {
-		if hasThroughput, ok := dynsamplerInstance.(CanSetGoalThroughputPerSec); ok {
+	for dynsamplerKey, entry := range s.sharedDynsamplers {
+		if hasThroughput, ok := entry.dynsampler.(CanSetGoalThroughputPerSec); ok {
 			if cfg, ok := s.goalThroughputConfigs[dynsamplerKey]; ok {
 				// Calculate new throughput based on cluster size
 				newThroughput := max(cfg/s.peerCount, 1)
@@ -68,30 +78,46 @@ func (s *SamplerFactory) updatePeerCounts() {
 
 func (s *SamplerFactory) Start() error {
 	s.peerCount = 1
-	s.sharedDynsamplers = make(map[string]any)
+	s.sharedDynsamplers = make(map[string]sharedDynsamplerEntry)
 	s.goalThroughputConfigs = make(map[string]int)
 	if s.Peers != nil {
 		s.Peers.RegisterUpdatedPeersCallback(s.updatePeerCounts)
 	}
+	for _, metric := range samplerFactoryMetrics {
+		s.Metrics.Register(metric)
+	}
 	return nil
 }
 
-func getSharedDynsampler[ST any, CT any](
+func getSharedDynsamplerAndRecorder[ST dynsampler.Sampler, CT any](
 	s *SamplerFactory,
 	dynsamplerKey string,
+	prefix string,
 	config CT,
 	create func(config CT) ST,
-) ST {
+) (ST, *dynsamplerMetricsRecorder) {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
 
-	var ok bool
-	var dynsamplerInstance ST
-	if dynsamplerInstance, ok = s.sharedDynsamplers[dynsamplerKey].(ST); !ok {
-		dynsamplerInstance = create(config)
-		s.sharedDynsamplers[dynsamplerKey] = dynsamplerInstance
+	if entry, ok := s.sharedDynsamplers[dynsamplerKey]; ok {
+		if existing, ok := entry.dynsampler.(ST); ok {
+			return existing, entry.recorder
+		}
 	}
-	return dynsamplerInstance
+	dynsamplerInstance := create(config)
+	r := &dynsamplerMetricsRecorder{prefix: prefix, met: s.Metrics}
+	r.RegisterMetrics(dynsamplerInstance)
+	s.sharedDynsamplers[dynsamplerKey] = sharedDynsamplerEntry{dynsampler: dynsamplerInstance, recorder: r}
+	return dynsamplerInstance, r
+}
+
+// makeDynsamplerKey builds a dynsampler map key with a sorted copy of fieldList so that
+// configs with the same fields in different order always map to the same instance.
+func makeDynsamplerKey(prefix, samplerType string, rate int64, fieldList []string) string {
+	sorted := make([]string, len(fieldList))
+	copy(sorted, fieldList)
+	slices.Sort(sorted)
+	return fmt.Sprintf("%s:%s:%d:%v", prefix, samplerType, rate, sorted)
 }
 
 // createSampler creates a sampler with shared dynsamplers based on the config type.
@@ -107,45 +133,45 @@ func (s *SamplerFactory) createSampler(c any, keyPrefix string) Sampler {
 	case *config.DeterministicSamplerConfig:
 		sampler = &DeterministicSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics}
 	case *config.DynamicSamplerConfig:
-		dynsamplerKey := fmt.Sprintf("%s:dynamic:%d:%v", keyPrefix, c.SampleRate, c.FieldList)
-		dynsamplerInstance := getSharedDynsampler(s, dynsamplerKey, c, createDynForDynamicSampler)
-		sampler = &DynamicSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance}
+		dynsamplerKey := makeDynsamplerKey(keyPrefix, "dynamic", c.SampleRate, c.FieldList)
+		dynsamplerInstance, recorder := getSharedDynsamplerAndRecorder(s, dynsamplerKey, "dynamic", c, createDynForDynamicSampler)
+		sampler = &DynamicSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance, metricsRecorder: recorder}
 	case *config.EMADynamicSamplerConfig:
-		dynsamplerKey := fmt.Sprintf("%s:emadynamic:%d:%v", keyPrefix, c.GoalSampleRate, c.FieldList)
-		dynsamplerInstance := getSharedDynsampler(s, dynsamplerKey, c, createDynForEMADynamicSampler)
-		sampler = &EMADynamicSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance}
+		dynsamplerKey := makeDynsamplerKey(keyPrefix, "emadynamic", int64(c.GoalSampleRate), c.FieldList)
+		dynsamplerInstance, recorder := getSharedDynsamplerAndRecorder(s, dynsamplerKey, "emadynamic", c, createDynForEMADynamicSampler)
+		sampler = &EMADynamicSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance, metricsRecorder: recorder}
 	case *config.RulesBasedSamplerConfig:
 		sampler = &RulesBasedSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, SamplerFactory: s, samplerPrefix: keyPrefix}
 	case *config.TotalThroughputSamplerConfig:
-		dynsamplerKey := fmt.Sprintf("%s:totalthroughput:%d:%v", keyPrefix, c.GoalThroughputPerSec, c.FieldList)
-		dynsamplerInstance := getSharedDynsampler(s, dynsamplerKey, c, createDynForTotalThroughputSampler)
+		dynsamplerKey := makeDynsamplerKey(keyPrefix, "totalthroughput", int64(c.GoalThroughputPerSec), c.FieldList)
+		dynsamplerInstance, recorder := getSharedDynsamplerAndRecorder(s, dynsamplerKey, "totalthroughput", c, createDynForTotalThroughputSampler)
 		// only track goal throughput config if we need to recalculate it later based on cluster size
 		if c.UseClusterSize {
 			s.mutex.Lock()
 			s.goalThroughputConfigs[dynsamplerKey] = c.GoalThroughputPerSec
 			s.mutex.Unlock()
 		}
-		sampler = &TotalThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance}
+		sampler = &TotalThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance, metricsRecorder: recorder}
 	case *config.EMAThroughputSamplerConfig:
-		dynsamplerKey := fmt.Sprintf("%s:emathroughput:%d:%v", keyPrefix, c.GoalThroughputPerSec, c.FieldList)
-		dynsamplerInstance := getSharedDynsampler(s, dynsamplerKey, c, createDynForEMAThroughputSampler)
+		dynsamplerKey := makeDynsamplerKey(keyPrefix, "emathroughput", int64(c.GoalThroughputPerSec), c.FieldList)
+		dynsamplerInstance, recorder := getSharedDynsamplerAndRecorder(s, dynsamplerKey, "emathroughput", c, createDynForEMAThroughputSampler)
 		// only track goal throughput config if we need to recalculate it later based on cluster size
 		if c.UseClusterSize {
 			s.mutex.Lock()
 			s.goalThroughputConfigs[dynsamplerKey] = c.GoalThroughputPerSec
 			s.mutex.Unlock()
 		}
-		sampler = &EMAThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance}
+		sampler = &EMAThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance, metricsRecorder: recorder}
 	case *config.WindowedThroughputSamplerConfig:
-		dynsamplerKey := fmt.Sprintf("%s:windowedthroughput:%d:%v", keyPrefix, c.GoalThroughputPerSec, c.FieldList)
-		dynsamplerInstance := getSharedDynsampler(s, dynsamplerKey, c, createDynForWindowedThroughputSampler)
+		dynsamplerKey := makeDynsamplerKey(keyPrefix, "windowedthroughput", int64(c.GoalThroughputPerSec), c.FieldList)
+		dynsamplerInstance, recorder := getSharedDynsamplerAndRecorder(s, dynsamplerKey, "windowedthroughput", c, createDynForWindowedThroughputSampler)
 		// only track goal throughput config if we need to recalculate it later based on cluster size
 		if c.UseClusterSize {
 			s.mutex.Lock()
 			s.goalThroughputConfigs[dynsamplerKey] = c.GoalThroughputPerSec
 			s.mutex.Unlock()
 		}
-		sampler = &WindowedThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance}
+		sampler = &WindowedThroughputSampler{Config: c, Logger: s.Logger, Metrics: s.Metrics, dynsampler: dynsamplerInstance, metricsRecorder: recorder}
 	default:
 		s.Logger.Error().Logf("unknown sampler type %T. Exiting.", c)
 		os.Exit(1)
@@ -161,6 +187,7 @@ func (s *SamplerFactory) createSampler(c any, keyPrefix string) Sampler {
 	s.Logger.Debug().WithField("dataset", keyPrefix).Logf("created implementation for sampler type %T", c)
 	// Update peer counts after creating a sampler
 	s.updatePeerCounts()
+	s.Metrics.Gauge("unique_dynsampler_count", float64(len(s.sharedDynsamplers)))
 
 	return sampler
 }
@@ -211,8 +238,8 @@ func (s *SamplerFactory) ClearDynsamplers() {
 	defer s.mutex.Unlock()
 
 	// Stop all shared dynsamplers
-	for _, dynSampler := range s.sharedDynsamplers {
-		if stopper, ok := dynSampler.(interface{ Stop() }); ok {
+	for _, entry := range s.sharedDynsamplers {
+		if stopper, ok := entry.dynsampler.(interface{ Stop() }); ok {
 			stopper.Stop()
 		}
 	}
@@ -247,6 +274,7 @@ type internalDysamplerMetric struct {
 }
 
 type dynsamplerMetricsRecorder struct {
+	mu        sync.Mutex
 	prefix    string
 	dynPrefix string // Used for accessing metrics from dynsampler-go
 	// Stores the last recorded internal metrics produced by dynsampler-go
@@ -258,8 +286,8 @@ type dynsamplerMetricsRecorder struct {
 // RegisterMetrics registers the metrics that will be recorded by this package.
 // It initializes the necessary metrics and prepares them for recording.
 // It MUST be called before any calls to RecordMetrics.
+// This function is not concurrency safe.
 func (d *dynsamplerMetricsRecorder) RegisterMetrics(sampler dynsampler.Sampler) {
-	// Register statistics this package will produce
 	d.dynPrefix = d.prefix + "_"
 	d.lastMetrics = make(map[string]internalDysamplerMetric)
 	dynInternalMetrics := sampler.GetMetrics(d.dynPrefix)
@@ -274,6 +302,7 @@ func (d *dynsamplerMetricsRecorder) RegisterMetrics(sampler dynsampler.Sampler) 
 }
 
 func (d *dynsamplerMetricsRecorder) RecordMetrics(sampler dynsampler.Sampler, kept bool, rate uint, numTraceKey int) {
+	d.mu.Lock()
 	for name, val := range sampler.GetMetrics(d.dynPrefix) {
 		m := d.lastMetrics[name]
 		switch m.metricType {
@@ -286,6 +315,7 @@ func (d *dynsamplerMetricsRecorder) RecordMetrics(sampler dynsampler.Sampler, ke
 			d.met.Gauge(name, float64(val))
 		}
 	}
+	d.mu.Unlock()
 
 	if kept {
 		d.met.Increment(d.metricNames.numKept)
