@@ -75,6 +75,7 @@ func populateConfigContents(cfg Config) configContents {
 		GRPCServerParameters: cfg.GetGRPCConfig(),
 		SampleCache:          cfg.GetSampleCacheConfig(),
 		StressRelief:         cfg.GetStressReliefConfig(),
+		GCSExport:            cfg.GetGCSExportConfig(),
 	}
 }
 

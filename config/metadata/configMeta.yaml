@@ -2123,3 +2123,91 @@ groups:
           If this duration is `0`, then Refinery will not start in stressed
           mode, which will provide faster startup at the possible cost of
           startup instability.
+
+  - name: GCSExport
+    title: "GCS Export"
+    description: >
+      contains configuration for optionally exporting sampled (kept) trace
+      spans to a Google Cloud Storage bucket in addition to sending them to
+      Honeycomb. Spans are buffered in memory and written as gzipped JSON
+      Lines objects, batched into time-partitioned paths of the form
+      `KeyPrefix/YYYY/MM/DD/HH/hostname-timestamp.jsonl.gz`. Authentication
+      uses Google Application Default Credentials.
+    fields:
+      - name: Enabled
+        type: bool
+        valuetype: nondefault
+        firstversion: v3.3
+        default: false
+        reload: false
+        summary: controls whether kept trace spans are also exported to a GCS bucket.
+        description: >
+          If `true`, every span belonging to a trace that Refinery decides to
+          keep is also written to the configured GCS bucket. Spans of dropped
+          traces are never exported.
+
+      - name: Bucket
+        type: string
+        valuetype: nondefault
+        firstversion: v3.3
+        default: ""
+        example: "my-trace-archive"
+        envvar: REFINERY_GCS_EXPORT_BUCKET
+        commandline: gcs-export-bucket
+        reload: false
+        summary: is the name of the GCS bucket to which sampled traces are exported.
+        description: >
+          The bucket must already exist and the credentials available via
+          Application Default Credentials must have permission to create
+          objects in it. Required when `Enabled` is `true`.
+
+      - name: KeyPrefix
+        type: string
+        valuetype: nondefault
+        firstversion: v3.3
+        default: ""
+        example: "refinery/traces"
+        reload: false
+        summary: is the object name prefix under which exported objects are written.
+        description: >
+          Object names are formed by appending time-partitioned path elements
+          to this prefix. Leave empty to write at the root of the bucket.
+
+      - name: FlushInterval
+        type: duration
+        valuetype: nondefault
+        firstversion: v3.3
+        default: 60s
+        reload: false
+        summary: is the maximum time a batch of spans is buffered before being written to GCS.
+        description: >
+          A batch is flushed to GCS when it reaches `MaxBatchSize` or when
+          this interval has elapsed since the batch was started, whichever
+          comes first.
+
+      - name: MaxBatchSize
+        type: memorysize
+        valuetype: memorysize
+        firstversion: v3.3
+        default: 100MB
+        reload: false
+        summary: is the maximum uncompressed size of a batch before it is written to GCS.
+        description: >
+          When the serialized (uncompressed) size of the current batch exceeds
+          this value, it is compressed and written to GCS immediately. The
+          objects stored in GCS are gzip-compressed and thus considerably
+          smaller than this value.
+
+      - name: QueueSize
+        type: int
+        valuetype: nondefault
+        firstversion: v3.3
+        default: 100000
+        reload: false
+        summary: is the number of spans that can be queued for export before spans are dropped.
+        description: >
+          Spans are handed to the exporter through a fixed-size queue so that
+          a slow or unavailable GCS never blocks sending traces to Honeycomb.
+          If the queue is full, new spans are dropped from the export (they
+          are still sent to Honeycomb) and the `gcs_export_dropped` metric is
+          incremented.

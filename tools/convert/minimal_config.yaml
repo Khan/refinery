@@ -1,5 +1,5 @@
 # sample uncommented config file containing all possible fields
-# automatically generated on 2026-04-09 at 22:21:30 UTC
+# automatically generated on 2026-07-07 at 21:27:50 UTC
 General:
   ConfigurationVersion: 2
   MinRefineryVersion: "v2.0"
@@ -148,3 +148,10 @@ StressRelief:
   DeactivationLevel: 75
   SamplingRate: 100
   MinimumActivationDuration: 10s
+GCSExport:
+  Enabled: false
+  Bucket: "my-trace-archive"
+  KeyPrefix: "refinery/traces"
+  FlushInterval: 60s
+  MaxBatchSize: 100MB
+  QueueSize: 100_000

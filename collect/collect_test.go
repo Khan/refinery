@@ -882,6 +882,7 @@ func TestDependencyInjection(t *testing.T) {
 		&inject.Object{Value: &sharder.SingleServerSharder{}},
 		&inject.Object{Value: &transmit.MockTransmission{}, Name: "upstreamTransmission"},
 		&inject.Object{Value: &transmit.MockTransmission{}, Name: "peerTransmission"},
+		&inject.Object{Value: &transmit.NoopTransmission{}, Name: "gcsExport"},
 		&inject.Object{Value: &pubsub.LocalPubSub{}},
 		&inject.Object{Value: &metrics.NullMetrics{}, Name: "metrics"},
 		&inject.Object{Value: &sample.SamplerFactory{}},

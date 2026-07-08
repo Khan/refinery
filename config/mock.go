@@ -36,6 +36,7 @@ type MockConfig struct {
 	GetOpAmpConfigVal                OpAMPConfig
 	GetOTelMetricsConfigVal          OTelMetricsConfig
 	GetOTelTracingConfigVal          OTelTracingConfig
+	GetGCSExportConfigVal            GCSExportConfig
 	IdentifierInterfaceName          string
 	UseIPV6Identifier                bool
 	RedisIdentifier                  string
@@ -249,6 +250,13 @@ func (m *MockConfig) GetOTelTracingConfig() OTelTracingConfig {
 	defer m.Mux.RUnlock()
 
 	return m.GetOTelTracingConfigVal
+}
+
+func (m *MockConfig) GetGCSExportConfig() GCSExportConfig {
+	m.Mux.RLock()
+	defer m.Mux.RUnlock()
+
+	return m.GetGCSExportConfigVal
 }
 
 // GetSamplerConfigForDestName returns the sampler config for the given dataset/environment.
