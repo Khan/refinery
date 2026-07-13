@@ -67,6 +67,7 @@ type configContents struct {
 	GRPCServerParameters GRPCServerParameters      `yaml:"GRPCServerParameters"`
 	SampleCache          SampleCacheConfig         `yaml:"SampleCache"`
 	StressRelief         StressReliefConfig        `yaml:"StressRelief"`
+	GCSExport            GCSExportConfig           `yaml:"GCSExport"`
 }
 
 type GeneralConfig struct {
@@ -285,6 +286,17 @@ type OTelMetricsConfig struct {
 	Compression          string            `yaml:"Compression" default:"gzip"`
 	ReportingInterval    Duration          `yaml:"ReportingInterval" default:"30s"`
 	AdditionalAttributes map[string]string `yaml:"AdditionalAttributes" default:"{}" cmdenv:"OTelMetricsAdditionalAttributes"`
+}
+
+// GCSExportConfig configures the optional export of sampled (kept) trace
+// spans to a Google Cloud Storage bucket as gzipped JSON Lines objects.
+type GCSExportConfig struct {
+	Enabled       bool       `yaml:"Enabled" default:"false"`
+	Bucket        string     `yaml:"Bucket" cmdenv:"GCSExportBucket"`
+	KeyPrefix     string     `yaml:"KeyPrefix"`
+	FlushInterval Duration   `yaml:"FlushInterval" default:"60s"`
+	MaxBatchSize  MemorySize `yaml:"MaxBatchSize" default:"100MB"`
+	QueueSize     int        `yaml:"QueueSize" default:"100000"`
 }
 
 type OTelTracingConfig struct {
@@ -1025,6 +1037,13 @@ func (f *fileConfig) GetOTelMetricsConfig() OTelMetricsConfig {
 	defer f.mux.RUnlock()
 
 	return f.mainConfig.OTelMetrics
+}
+
+func (f *fileConfig) GetGCSExportConfig() GCSExportConfig {
+	f.mux.RLock()
+	defer f.mux.RUnlock()
+
+	return f.mainConfig.GCSExport
 }
 
 func (f *fileConfig) GetDebugServiceAddr() string {

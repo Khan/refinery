@@ -2,7 +2,7 @@
 ## Honeycomb Refinery Configuration ##
 ######################################
 #
-# created {{ now }} from {{ .Input }} using a template generated on 2026-04-09 at 22:21:28 UTC
+# created {{ now }} from {{ .Input }} using a template generated on 2026-07-07 at 21:27:49 UTC
 
 # This file contains a configuration for the Honeycomb Refinery. It is in YAML
 # format, organized into named groups, each of which contains a set of
@@ -1413,6 +1413,84 @@ StressRelief:
     ## default: 10s
     ## Eligible for live reload.
     {{ nonDefaultOnly .Data "MinimumActivationDuration" "StressRelief.MinimumActivationDuration" "10s" }}
+
+################
+## GCS Export ##
+################
+GCSExport:
+  ## GCSExport contains configuration for optionally exporting sampled
+  ## (kept) trace spans to a Google Cloud Storage bucket in addition to
+  ## sending them to Honeycomb. Spans are buffered in memory and written as
+  ## gzipped JSON Lines objects, batched into time-partitioned paths of the
+  ## form `KeyPrefix/YYYY/MM/DD/HH/hostname-timestamp.jsonl.gz`.
+  ## Authentication uses Google Application Default Credentials.
+  ##
+  ####
+    ## Enabled controls whether kept trace spans are also exported to a GCS
+    ## bucket.
+    ##
+    ## If `true`, every span belonging to a trace that Refinery decides to
+    ## keep is also written to the configured GCS bucket. Spans of dropped
+    ## traces are never exported.
+    ##
+    ## Not eligible for live reload.
+    {{ nonDefaultOnly .Data "Enabled" "Enabled" false }}
+
+    ## Bucket is the name of the GCS bucket to which sampled traces are
+    ## exported.
+    ##
+    ## The bucket must already exist and the credentials available via
+    ## Application Default Credentials must have permission to create objects
+    ## in it. Required when `Enabled` is `true`.
+    ##
+    ## Not eligible for live reload.
+    {{ nonDefaultOnly .Data "Bucket" "Bucket" "" }}
+
+    ## KeyPrefix is the object name prefix under which exported objects are
+    ## written.
+    ##
+    ## Object names are formed by appending time-partitioned path elements to
+    ## this prefix. Leave empty to write at the root of the bucket.
+    ##
+    ## Not eligible for live reload.
+    {{ nonDefaultOnly .Data "KeyPrefix" "KeyPrefix" "" }}
+
+    ## FlushInterval is the maximum time a batch of spans is buffered before
+    ## being written to GCS.
+    ##
+    ## A batch is flushed to GCS when it reaches `MaxBatchSize` or when this
+    ## interval has elapsed since the batch was started, whichever comes
+    ## first.
+    ##
+    ## Accepts a duration string with units, like "60s".
+    ## default: 60s
+    ## Not eligible for live reload.
+    {{ nonDefaultOnly .Data "FlushInterval" "FlushInterval" "60s" }}
+
+    ## MaxBatchSize is the maximum uncompressed size of a batch before it is
+    ## written to GCS.
+    ##
+    ## When the serialized (uncompressed) size of the current batch exceeds
+    ## this value, it is compressed and written to GCS immediately. The
+    ## objects stored in GCS are gzip-compressed and thus considerably
+    ## smaller than this value.
+    ##
+    ## default: 100MB
+    ## Not eligible for live reload.
+    {{ memorysize .Data "MaxBatchSize" "MaxBatchSize" "" }}
+
+    ## QueueSize is the number of spans that can be queued for export before
+    ## spans are dropped.
+    ##
+    ## Spans are handed to the exporter through a fixed-size queue so that a
+    ## slow or unavailable GCS never blocks sending traces to Honeycomb. If
+    ## the queue is full, new spans are dropped from the export (they are
+    ## still sent to Honeycomb) and the `gcs_export_dropped` metric is
+    ## incremented.
+    ##
+    ## default: 100000
+    ## Not eligible for live reload.
+    {{ nonDefaultOnly .Data "QueueSize" "QueueSize" 100000 }}
 
 
 ###################################################

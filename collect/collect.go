@@ -88,6 +88,7 @@ type InMemCollector struct {
 
 	Transmission     transmit.Transmission  `inject:"upstreamTransmission"`
 	PeerTransmission transmit.Transmission  `inject:"peerTransmission"`
+	GCSExport        transmit.Transmission  `inject:"gcsExport"`
 	PubSub           pubsub.PubSub          `inject:""`
 	Metrics          metrics.Metrics        `inject:"metrics"`
 	SamplerFactory   *sample.SamplerFactory `inject:""`
@@ -491,8 +492,18 @@ func (i *InMemCollector) ProcessSpanImmediately(sp *types.Span) (processed bool,
 	i.addAdditionalAttributes(sp)
 	mergeTraceAndSpanSampleRates(sp, rate, i.Config.GetIsDryRun())
 	i.Transmission.EnqueueSpan(sp)
+	i.exportSpan(sp)
 
 	return true, true
+}
+
+// exportSpan sends a kept span to the optional GCS exporter, if one is
+// configured. It must only be called for spans of traces that were actually
+// kept by the sampler (not for dry-run "would have dropped" sends).
+func (i *InMemCollector) exportSpan(sp *types.Span) {
+	if i.GCSExport != nil {
+		i.GCSExport.EnqueueSpan(sp)
+	}
 }
 
 // dealWithSentTrace handles a span that has arrived after the sampling decision
@@ -557,6 +568,7 @@ func (i *InMemCollector) dealWithSentTrace(ctx context.Context, tr cache.TraceSe
 		i.Metrics.Increment(TraceSendLateSpan)
 		i.addAdditionalAttributes(sp)
 		i.Transmission.EnqueueSpan(sp)
+		i.exportSpan(sp)
 		return
 	}
 	i.Metrics.Increment("events_dropped")
@@ -834,6 +846,12 @@ func (i *InMemCollector) sendTraces() {
 
 			sp.APIKey = t.APIKey
 			i.Transmission.EnqueueSpan(sp)
+			// only export spans of traces the sampler actually kept; in dry
+			// run mode, traces that would have been dropped still reach here
+			// with shouldSend=false and are not exported.
+			if t.shouldSend {
+				i.exportSpan(sp)
+			}
 		}
 		span.End()
 	}

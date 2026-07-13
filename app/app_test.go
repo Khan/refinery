@@ -368,6 +368,7 @@ func newStartedApp(
 		&inject.Object{Value: http.DefaultTransport, Name: "upstreamTransport"},
 		&inject.Object{Value: upstreamTransmission, Name: "upstreamTransmission"},
 		&inject.Object{Value: peerTransmissionWrapper, Name: "peerTransmission"},
+		&inject.Object{Value: &transmit.NoopTransmission{}, Name: "gcsExport"},
 		&inject.Object{Value: shrdr},
 		&inject.Object{Value: noop.NewTracerProvider().Tracer("test"), Name: "tracer"},
 		&inject.Object{Value: collector},
