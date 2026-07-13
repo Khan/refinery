@@ -12,6 +12,7 @@ import (
 	"github.com/facebookgo/inject"
 	"github.com/facebookgo/startstop"
 	"github.com/honeycombio/refinery/config"
+	"github.com/honeycombio/refinery/internal/redistest"
 	"github.com/honeycombio/refinery/logger"
 	"github.com/honeycombio/refinery/metrics"
 	"github.com/honeycombio/refinery/pubsub"
@@ -87,10 +88,14 @@ func newPeers(c config.Config) (Peers, error) {
 }
 
 func TestPeerShutdown(t *testing.T) {
+	host, port := redistest.Endpoint(t)
 	c := &config.MockConfig{
 		GetPeerListenAddrVal: "0.0.0.0:8081",
 		PeerManagementType:   "redis",
 		PeerTimeout:          5 * time.Second,
+		GetRedisPeerManagementVal: config.RedisPeerManagementConfig{
+			Host: host + ":" + port,
+		},
 	}
 
 	p, err := newPeers(c)

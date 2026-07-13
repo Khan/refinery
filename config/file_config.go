@@ -67,6 +67,7 @@ type configContents struct {
 	GRPCServerParameters GRPCServerParameters      `yaml:"GRPCServerParameters"`
 	SampleCache          SampleCacheConfig         `yaml:"SampleCache"`
 	StressRelief         StressReliefConfig        `yaml:"StressRelief"`
+	GCSExport            GCSExportConfig           `yaml:"GCSExport"`
 }
 
 type GeneralConfig struct {
@@ -92,16 +93,21 @@ type NetworkConfig struct {
 
 type AccessKeyConfig struct {
 	ReceiveKeys          []string `yaml:"ReceiveKeys" default:"[]"`
+	ReceiveKeyIDs        []string `yaml:"ReceiveKeyIDs" default:"[]"`
 	SendKey              string   `yaml:"SendKey" cmdenv:"SendKey"`
 	SendKeyMode          string   `yaml:"SendKeyMode" default:"none"`
 	AcceptOnlyListedKeys bool     `yaml:"AcceptOnlyListedKeys"`
 }
 
-// IsAccepted checks if the given key is in the list of received keys or a configured SendKey.
-// if not, it returns an error with the key truncated to 8 characters for logging.
-func (a *AccessKeyConfig) IsAccepted(key string) error {
+// IsAccepted checks if the given key (or its associated key ID) is authorized.
+// keyID is the Honeycomb ingest key ID returned by the /1/auth endpoint; it may
+// be empty if the lookup has not yet occurred or if the key is a legacy key.
+// If not accepted, it returns an error with the key truncated to 8 characters for logging.
+func (a *AccessKeyConfig) IsAccepted(key, keyID string) error {
 	if a.AcceptOnlyListedKeys {
-		if (len(a.SendKey) > 0 && key == a.SendKey) || slices.Contains(a.ReceiveKeys, key) {
+		if (len(a.SendKey) > 0 && key == a.SendKey) ||
+			slices.Contains(a.ReceiveKeys, key) ||
+			(keyID != "" && slices.Contains(a.ReceiveKeyIDs, keyID)) {
 			return nil
 		}
 
@@ -110,10 +116,15 @@ func (a *AccessKeyConfig) IsAccepted(key string) error {
 	return nil
 }
 
+// HasKeyIDs returns true if ReceiveKeyIDs has been configured.
+func (a *AccessKeyConfig) HasKeyIDs() bool {
+	return len(a.ReceiveKeyIDs) > 0
+}
+
 // GetReplaceKey checks the given API key against the configuration
 // and possibly replaces it with the configured SendKey, if the settings so indicate.
 // It returns the key to use, or an error if the key is invalid given the settings.
-func (a *AccessKeyConfig) GetReplaceKey(apiKey string) (string, error) {
+func (a *AccessKeyConfig) GetReplaceKey(apiKey, keyID string) (string, error) {
 	if a.SendKey != "" {
 		overwriteWith := ""
 		switch a.SendKeyMode {
@@ -129,10 +140,10 @@ func (a *AccessKeyConfig) GetReplaceKey(apiKey string) (string, error) {
 				overwriteWith = a.SendKey
 			}
 		case "listedonly":
-			// only replace keys that are listed in the `ReceiveKeys` list,
+			// only replace keys that are listed in the `ReceiveKeys` or `ReceiveKeyIDs` list,
 			// otherwise use original key
 			overwriteWith = apiKey
-			if slices.Contains(a.ReceiveKeys, apiKey) {
+			if slices.Contains(a.ReceiveKeys, apiKey) || (keyID != "" && slices.Contains(a.ReceiveKeyIDs, keyID)) {
 				overwriteWith = a.SendKey
 			}
 		case "missingonly":
@@ -143,11 +154,11 @@ func (a *AccessKeyConfig) GetReplaceKey(apiKey string) (string, error) {
 				overwriteWith = a.SendKey
 			}
 		case "unlisted":
-			// only replace nonblank keys that are NOT listed in the `ReceiveKeys` list
+			// only replace nonblank keys that are NOT listed in the `ReceiveKeys` or `ReceiveKeyIDs` list
 			// otherwise use original key
 			if apiKey != "" {
 				overwriteWith = apiKey
-				if !slices.Contains(a.ReceiveKeys, apiKey) {
+				if !slices.Contains(a.ReceiveKeys, apiKey) && !(keyID != "" && slices.Contains(a.ReceiveKeyIDs, keyID)) {
 					overwriteWith = a.SendKey
 				}
 			}
@@ -189,10 +200,10 @@ func (dt *DefaultTrue) UnmarshalText(text []byte) error {
 }
 
 type RefineryTelemetryConfig struct {
-	AddRuleReasonToTrace   bool         `yaml:"AddRuleReasonToTrace"`
-	AddSpanCountToRoot     *DefaultTrue `yaml:"AddSpanCountToRoot" default:"true"` // Avoid pointer woe on access, use GetAddSpanCountToRoot() instead.
-	AddCountsToRoot        bool         `yaml:"AddCountsToRoot"`
-	AddHostMetadataToTrace *DefaultTrue `yaml:"AddHostMetadataToTrace" default:"true"` // Avoid pointer woe on access, use GetAddHostMetadataToTrace() instead.
+	AddRuleReasonToTrace   bool                `yaml:"AddRuleReasonToTrace"`
+	AddSpanCountToRoot     *DefaultTrue        `yaml:"AddSpanCountToRoot" default:"true"` // Avoid pointer woe on access, use GetAddSpanCountToRoot() instead.
+	AddCountsToRoot        bool                `yaml:"AddCountsToRoot"`
+	AddHostMetadataToTrace *DefaultTrue        `yaml:"AddHostMetadataToTrace" default:"true"` // Avoid pointer woe on access, use GetAddHostMetadataToTrace() instead.
 }
 
 type TracesConfig struct {
@@ -268,12 +279,24 @@ type PrometheusMetricsConfig struct {
 }
 
 type OTelMetricsConfig struct {
-	Enabled           bool     `yaml:"Enabled" default:"false"`
-	APIHost           string   `yaml:"APIHost" default:"https://api.honeycomb.io" cmdenv:"TelemetryEndpoint"`
-	APIKey            string   `yaml:"APIKey" cmdenv:"OTelMetricsAPIKey,HoneycombAPIKey"`
-	Dataset           string   `yaml:"Dataset" default:"Refinery Metrics"`
-	Compression       string   `yaml:"Compression" default:"gzip"`
-	ReportingInterval Duration `yaml:"ReportingInterval" default:"30s"`
+	Enabled              bool              `yaml:"Enabled" default:"false"`
+	APIHost              string            `yaml:"APIHost" default:"https://api.honeycomb.io" cmdenv:"TelemetryEndpoint"`
+	APIKey               string            `yaml:"APIKey" cmdenv:"OTelMetricsAPIKey,HoneycombAPIKey"`
+	Dataset              string            `yaml:"Dataset" default:"Refinery Metrics"`
+	Compression          string            `yaml:"Compression" default:"gzip"`
+	ReportingInterval    Duration          `yaml:"ReportingInterval" default:"30s"`
+	AdditionalAttributes map[string]string `yaml:"AdditionalAttributes" default:"{}" cmdenv:"OTelMetricsAdditionalAttributes"`
+}
+
+// GCSExportConfig configures the optional export of sampled (kept) trace
+// spans to a Google Cloud Storage bucket as gzipped JSON Lines objects.
+type GCSExportConfig struct {
+	Enabled       bool       `yaml:"Enabled" default:"false"`
+	Bucket        string     `yaml:"Bucket" cmdenv:"GCSExportBucket"`
+	KeyPrefix     string     `yaml:"KeyPrefix"`
+	FlushInterval Duration   `yaml:"FlushInterval" default:"60s"`
+	MaxBatchSize  MemorySize `yaml:"MaxBatchSize" default:"100MB"`
+	QueueSize     int        `yaml:"QueueSize" default:"100000"`
 }
 
 type OTelTracingConfig struct {
@@ -597,6 +620,13 @@ func writeYAMLToFile(data any, filename string) error {
 // nil, it uses the command line arguments.
 // It also dumps the config and rules to the given files, if specified, which
 // will cause the program to exit.
+//
+// Return values follow an intentional two-level contract:
+//   - (nil, err): fatal error — config could not be loaded or has hard validation
+//     errors; the caller should not proceed.
+//   - (cfg, err): non-fatal warning — config loaded successfully but has deprecation
+//     or advisory warnings; the caller may log err and proceed using cfg.
+//   - (cfg, nil): success.
 func NewConfig(opts *CmdEnv, currentVersion ...string) (Config, error) {
 	cData, rData, err := newConfigAndRules(opts)
 	if err != nil {
@@ -604,8 +634,7 @@ func NewConfig(opts *CmdEnv, currentVersion ...string) (Config, error) {
 	}
 
 	cfg, err := newFileConfig(opts, cData, rData, currentVersion...)
-	// only exit if we have no config at all; if it fails validation, we'll
-	// do the rest and return it anyway
+	// only exit on fatal errors (cfg == nil); non-nil cfg with err means warnings only
 	if err != nil && cfg == nil {
 		return nil, err
 	}
@@ -1010,6 +1039,13 @@ func (f *fileConfig) GetOTelMetricsConfig() OTelMetricsConfig {
 	return f.mainConfig.OTelMetrics
 }
 
+func (f *fileConfig) GetGCSExportConfig() GCSExportConfig {
+	f.mux.RLock()
+	defer f.mux.RUnlock()
+
+	return f.mainConfig.GCSExport
+}
+
 func (f *fileConfig) GetDebugServiceAddr() string {
 	f.mux.RLock()
 	defer f.mux.RUnlock()
@@ -1114,6 +1150,13 @@ func (f *fileConfig) GetAddCountsToRoot() bool {
 	defer f.mux.RUnlock()
 
 	return f.mainConfig.Telemetry.AddCountsToRoot
+}
+
+func (f *fileConfig) GetSpanCounters() []SpanCounter {
+	f.mux.RLock()
+	defer f.mux.RUnlock()
+
+	return f.rulesConfig.SpanCounters
 }
 
 func (f *fileConfig) GetSampleCacheConfig() SampleCacheConfig {

@@ -1,5 +1,58 @@
 # Refinery Changelog
 
+## 3.2.2 2026-05-26
+
+### 🐛 Fixes
+
+- fix: validator exits non-zero on YAML parse errors in rules by @VinozzZ in https://github.com/honeycombio/refinery/pull/1820
+- fix: increment send_errors for network errors from request by @VinozzZ in https://github.com/honeycombio/refinery/pull/1823
+- fix: make sure FieldList is sorted before use it as dynsamplerKey by @VinozzZ in https://github.com/honeycombio/refinery/pull/1825
+- fix: overcounting dynsampler event_count and request_count by @VinozzZ in https://github.com/honeycombio/refinery/pull/1826
+- fix: copy fields slice before sorting in newTraceKey by @VinozzZ in https://github.com/honeycombio/refinery/pull/1827
+
+### 🛠 Maintenance
+
+- maint: remove proto/otlp fork reference by @VinozzZ in https://github.com/honeycombio/refinery/pull/1822
+
+## 3.2.1 2026-05-04
+
+This release fixes a bug in OTLP JSON ingestion where `traceId` and `spanId` fields were incorrectly treated as base64-encoded. The OTLP JSON spec explicitly requires these fields to be hex-encoded strings, and clients sending data over OTLP HTTP/JSON would receive corrupted ID values as a result.
+
+### 🛠 Maintenance
+
+- maint: update honeycombio/husky to v0.43.1 by @VinozzZ in https://github.com/honeycombio/refinery/pull/1816
+- maint(deps): bump the minor-patch group with 8 updates by @dependabot in https://github.com/honeycombio/refinery/pull/1814
+
+## 3.2.0 2026-04-13
+
+### 💡 Enhancements
+
+- feat: add ReceiveKeyIDs config option for key ID-based authorization by @tdarwin in https://github.com/honeycombio/refinery/pull/1803
+- feat: add OTelMetrics.AdditionalAttributes config option by @tdarwin in https://github.com/honeycombio/refinery/pull/1804
+- feat: add granular event metrics by @tdarwin in https://github.com/honeycombio/refinery/pull/1805
+
+### 🐛 Fixes
+
+- fix: include AdditionalErrorFields in logs for transmission code by @VinozzZ in https://github.com/honeycombio/refinery/pull/1807
+
+### 🛠 Maintenance
+
+- fix: update ko build tooling and fix flaky integration test by @tdarwin in https://github.com/honeycombio/refinery/pull/1806
+- maint(deps): bump go.opentelemetry.io/otel/sdk from 1.42.0 to 1.43.0 by @dependabot in https://github.com/honeycombio/refinery/pull/1810
+- maint(deps): bump the minor-patch group across 1 directory with 12 updates by @dependabot in https://github.com/honeycombio/refinery/pull/1812
+
+## 3.1.2 2026-03-25
+
+This release addresses security vulnerabilities CVE-2026-27139, CVE-2026-27142, and CVE-2026-25679.
+
+### Features
+
+- feat: add capacity/limit companion metrics for queues and memory by @mterhar in https://github.com/honeycombio/refinery/pull/1799
+
+### Maintenance
+
+- maint(deps): bump the minor-patch group across 1 directory with 21 updates by @dependabot in https://github.com/honeycombio/refinery/pull/1795
+
 ## 3.1.1 2026-02-25
 
 ### Features

@@ -10,7 +10,7 @@ test: test_with_race test_all
 
 .PHONY: test_with_race
 #: run only tests tagged with potential race conditions
-test_with_race: test_results wait_for_redis
+test_with_race: test_results
 	@echo
 	@echo "+++ testing - race conditions?"
 	@echo
@@ -18,7 +18,7 @@ test_with_race: test_results wait_for_redis
 
 .PHONY: test_all
 #: run all tests, but with no race condition detection
-test_all: test_results wait_for_redis
+test_all: test_results
 	@echo
 	@echo "+++ testing - all the tests"
 	@echo
@@ -34,19 +34,10 @@ local_image: ko crane
 	./build-docker.sh
 	docker tag $$(docker images ko.local/refinery --quiet | head -1) ko.local/refinery:local
 
-.PHONY: wait_for_redis
-# wait for Redis to become available for test suite
-wait_for_redis: dockerize
-	@echo
-	@echo "+++ We need a Redis running to run the tests."
-	@echo
-	@echo "Checking with dockerize $(shell ./dockerize --version)"
-	@./dockerize -wait tcp://localhost:6379 -timeout 30s
-
 # You can override this version from an environment variable.
 HOST_OS := $(shell uname -s | tr A-Z a-z)
 # You can override this version from an environment variable.
-KO_VERSION ?= 0.11.2
+KO_VERSION ?= 0.18.0
 KO_RELEASE_ASSET := ko_${KO_VERSION}_${HOST_OS}_x86_64.tar.gz
 # ensure the ko command is available
 ko: ko_${KO_VERSION}.tar.gz
@@ -109,7 +100,7 @@ DOCKERIZE_RELEASE_ASSET := dockerize-${HOST_OS}-amd64-${DOCKERIZE_VERSION}.tar.g
 
 dockerize.tar.gz:
 	@echo
-	@echo "+++ Retrieving dockerize tool for Redis readiness check."
+	@echo "+++ Retrieving dockerize tool for service readiness checks."
 	@echo
 # make sure that file is available
 ifeq (, $(shell command -v file))
@@ -189,7 +180,3 @@ unsmoke:
 	@echo "+++ Spinning down the smokers."
 	@echo ""
 	cd smoke-test && docker-compose down --volumes
-
-
-
-

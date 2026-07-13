@@ -34,6 +34,7 @@ import (
 	"github.com/honeycombio/refinery/config"
 	"github.com/honeycombio/refinery/internal/health"
 	"github.com/honeycombio/refinery/internal/peer"
+	"github.com/honeycombio/refinery/internal/redistest"
 	"github.com/honeycombio/refinery/logger"
 	"github.com/honeycombio/refinery/metrics"
 	"github.com/honeycombio/refinery/pubsub"
@@ -235,17 +236,19 @@ func (w *countingTransmission) waitForCount(t testing.TB, n int) {
 // each test gets a unique port and redisDB.
 //
 // by default, every Redis instance supports 16 databases, we use redisDB as a way to separate test data
-func defaultConfig(basePort int, redisDB int, apiURL string) *config.MockConfig {
-	return defaultConfigWithGRPC(basePort, redisDB, apiURL, false)
+func defaultConfig(t testing.TB, basePort int, redisDB int, apiURL string) *config.MockConfig {
+	return defaultConfigWithGRPC(t, basePort, redisDB, apiURL, false)
 }
 
-func defaultConfigWithGRPC(basePort int, redisDB int, apiURL string, enableGRPC bool) *config.MockConfig {
+func defaultConfigWithGRPC(t testing.TB, basePort int, redisDB int, apiURL string, enableGRPC bool) *config.MockConfig {
 	if redisDB >= 16 {
 		panic("redisDB must be less than 16")
 	}
 	if apiURL == "" {
 		apiURL = "http://api.honeycomb.io"
 	}
+
+	redisHost, redisPort := redistest.Endpoint(t)
 
 	cfg := &config.MockConfig{
 		GetTracesConfigVal: config.TracesConfig{
@@ -258,6 +261,7 @@ func defaultConfigWithGRPC(basePort int, redisDB int, apiURL string, enableGRPC 
 		AddRuleReasonToTrace: true,
 		PeerManagementType:   "redis",
 		GetRedisPeerManagementVal: config.RedisPeerManagementConfig{
+			Host:     redisHost + ":" + redisPort,
 			Prefix:   "refinery-app-test",
 			Timeout:  config.Duration(1 * time.Second),
 			Database: redisDB,
@@ -364,6 +368,7 @@ func newStartedApp(
 		&inject.Object{Value: http.DefaultTransport, Name: "upstreamTransport"},
 		&inject.Object{Value: upstreamTransmission, Name: "upstreamTransmission"},
 		&inject.Object{Value: peerTransmissionWrapper, Name: "peerTransmission"},
+		&inject.Object{Value: &transmit.NoopTransmission{}, Name: "gcsExport"},
 		&inject.Object{Value: shrdr},
 		&inject.Object{Value: noop.NewTracerProvider().Tracer("test"), Name: "tracer"},
 		&inject.Object{Value: collector},
@@ -382,10 +387,19 @@ func newStartedApp(
 	assert.NoError(t, err)
 
 	err = startstop.Start(g.Objects(), nil)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
-	// Racy: wait just a moment for ListenAndServe to start up.
-	time.Sleep(15 * time.Millisecond)
+	// Wait for the HTTP server to be ready by polling the listen address.
+	listenAddr := c.GetListenAddr()
+	require.Eventually(t, func() bool {
+		conn, err := net.DialTimeout("tcp", listenAddr, 50*time.Millisecond)
+		if err != nil {
+			return false
+		}
+		conn.Close()
+		return true
+	}, 2*time.Second, 10*time.Millisecond, "server failed to start listening on %s", listenAddr)
+
 	return &a, g
 }
 
@@ -432,7 +446,7 @@ func TestAppIntegration(t *testing.T) {
 	redisDB := 2
 
 	testServer := newTestAPIServer(t)
-	cfg := defaultConfig(port, redisDB, testServer.server.URL)
+	cfg := defaultConfig(t, port, redisDB, testServer.server.URL)
 	app, graph := newStartedApp(t, nil, nil, cfg)
 
 	// Send a root span, it should be sent in short order.
@@ -679,7 +693,7 @@ func TestAppIntegrationSendKey(t *testing.T) {
 			redisDB := 1 + i
 
 			testServer := newTestAPIServer(t)
-			cfg := defaultConfig(port, redisDB, testServer.server.URL)
+			cfg := defaultConfig(t, port, redisDB, testServer.server.URL)
 			cfg.GetAccessKeyConfigVal = config.AccessKeyConfig{
 				SendKey:              tt.sendKey,
 				SendKeyMode:          tt.sendKeyMode,
@@ -893,7 +907,7 @@ func TestAppIntegrationWithNonLegacyKey(t *testing.T) {
 	redisDB := 3
 
 	testServer := newTestAPIServer(t)
-	cfg := defaultConfig(port, redisDB, testServer.server.URL)
+	cfg := defaultConfig(t, port, redisDB, testServer.server.URL)
 	a, graph := newStartedApp(t, nil, nil, cfg)
 	a.IncomingRouter.SetEnvironmentCache(time.Second, func(s string) (string, error) { return "test", nil })
 	a.PeerRouter.SetEnvironmentCache(time.Second, func(s string) (string, error) { return "test", nil })
@@ -933,7 +947,7 @@ func TestAppIntegrationEmptyEvent(t *testing.T) {
 	port := 19010
 	redisDB := 8
 
-	cfg := defaultConfig(port, redisDB, "")
+	cfg := defaultConfig(t, port, redisDB, "")
 	_, graph := newStartedApp(t, nil, nil, cfg)
 
 	tt := []struct {
@@ -996,7 +1010,7 @@ func TestPeerRouting(t *testing.T) {
 		senders[i] = &transmit.MockTransmission{}
 		peers := peer.NewMockPeers(peerList, peerList[i])
 		redisDB := 5 + i
-		cfg := defaultConfig(basePort, redisDB, "")
+		cfg := defaultConfig(t, basePort, redisDB, "")
 
 		apps[i], graph = newStartedApp(t, senders[i], peers, cfg)
 		defer startstop.Stop(graph.Objects(), nil)
@@ -1071,7 +1085,7 @@ func TestHostMetadataSpanAdditions(t *testing.T) {
 	redisDB := 7
 
 	testServer := newTestAPIServer(t)
-	cfg := defaultConfig(port, redisDB, testServer.server.URL)
+	cfg := defaultConfig(t, port, redisDB, testServer.server.URL)
 	cfg.AddHostMetadataToTrace = true
 	app, graph := newStartedApp(t, nil, nil, cfg)
 
@@ -1125,7 +1139,7 @@ func TestEventsEndpoint(t *testing.T) {
 		peers := peer.NewMockPeers(peerList, peerList[i])
 		redisDB := 8 + i
 
-		cfg := defaultConfig(basePort, redisDB, "")
+		cfg := defaultConfig(t, basePort, redisDB, "")
 		apps[i], graph = newStartedApp(t, senders[i], peers, cfg)
 		defer startstop.Stop(graph.Objects(), nil)
 	}
@@ -1221,7 +1235,7 @@ func TestEventsEndpointWithNonLegacyKey(t *testing.T) {
 		peers := peer.NewMockPeers(peerList, peerList[i])
 
 		redisDB := 10 + i
-		cfg := defaultConfig(basePort, redisDB, "")
+		cfg := defaultConfig(t, basePort, redisDB, "")
 
 		app, graph := newStartedApp(t, senders[i], peers, cfg)
 		app.IncomingRouter.SetEnvironmentCache(time.Second, func(s string) (string, error) { return "test", nil })
@@ -1309,7 +1323,7 @@ func TestOTLPProtobufIntegration(t *testing.T) {
 	redisDB := 14
 
 	testServer := newTestAPIServer(t)
-	cfg := defaultConfigWithGRPC(port, redisDB, testServer.server.URL, true)
+	cfg := defaultConfigWithGRPC(t, port, redisDB, testServer.server.URL, true)
 	app, graph := newStartedApp(t, nil, nil, cfg)
 
 	// Create OTLP protobuf request
@@ -1412,7 +1426,7 @@ func TestOTLPGRPCConcurrency(t *testing.T) {
 	redisDB := 15
 
 	testServer := newTestAPIServer(t)
-	cfg := defaultConfigWithGRPC(port, redisDB, testServer.server.URL, true)
+	cfg := defaultConfigWithGRPC(t, port, redisDB, testServer.server.URL, true)
 	_, graph := newStartedApp(t, nil, nil, cfg)
 
 	// Connect to gRPC server
@@ -1651,7 +1665,7 @@ func createBenchmarkOTLPRequest() *collectortrace.ExportTraceServiceRequest {
 func BenchmarkTracesOTLP(b *testing.B) {
 	sender := &countingTransmission{}
 	redisDB := 15
-	cfg := defaultConfigWithGRPC(18000, redisDB, "", true)
+	cfg := defaultConfigWithGRPC(b, 18000, redisDB, "", true)
 	_, graph := newStartedApp(b, sender, nil, cfg)
 	defer func() {
 		err := startstop.Stop(graph.Objects(), nil)
@@ -1764,7 +1778,7 @@ func BenchmarkTracesOTLP(b *testing.B) {
 func BenchmarkTraces(b *testing.B) {
 	sender := &countingTransmission{}
 	redisDB := 1
-	cfg := defaultConfig(11000, redisDB, "")
+	cfg := defaultConfig(b, 11000, redisDB, "")
 	_, graph := newStartedApp(b, sender, nil, cfg)
 	defer func() {
 		err := startstop.Stop(graph.Objects(), nil)
@@ -1804,8 +1818,8 @@ func BenchmarkTraces(b *testing.B) {
 }
 
 // createRulesBasedConfig creates a mock config with rules-based sampler containing downstream samplers
-func createRulesBasedConfig(port, redisDB int, apiURL string, throughputGoal int) *config.MockConfig {
-	cfg := defaultConfig(port, redisDB, apiURL)
+func createRulesBasedConfig(t testing.TB, port, redisDB int, apiURL string, throughputGoal int) *config.MockConfig {
+	cfg := defaultConfig(t, port, redisDB, apiURL)
 
 	// Configure rules-based sampler with selective rules
 	cfg.GetSamplerTypeVal = &config.RulesBasedSamplerConfig{
@@ -1890,7 +1904,7 @@ func TestRulesBasedSamplerWithDownstreamAndClusterChanges(t *testing.T) {
 	// Phase 1: Initial setup with single-node cluster
 	mockPeers := peer.NewMockPeers([]string{"http://localhost:20001"}, "http://localhost:20001")
 
-	cfg := createRulesBasedConfig(port, redisDB, testServer.server.URL, 100)
+	cfg := createRulesBasedConfig(t, port, redisDB, testServer.server.URL, 100)
 	_, graph := newStartedApp(t, nil, mockPeers, cfg)
 	defer startstop.Stop(graph.Objects(), nil)
 
@@ -2180,7 +2194,7 @@ func BenchmarkDistributedTraces(b *testing.B) {
 		peers := peer.NewMockPeers(peerList, peerList[i])
 
 		redisDB := 2 + i
-		cfg := defaultConfig(basePort, redisDB, "")
+		cfg := defaultConfig(b, basePort, redisDB, "")
 		apps[i], graph = newStartedApp(b, sender, peers, cfg)
 		defer startstop.Stop(graph.Objects(), nil)
 

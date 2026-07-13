@@ -738,3 +738,32 @@ groups:
           The best practice is to always specify `Datatype`; this avoids
           ambiguity, allows for more accurate comparisons, and offers a
           minor performance improvement.
+
+  - name: SpanCounters
+    title: "Custom Span Count Configuration"
+    sortorder: 80
+    description: >
+      Defines a single custom span counter. Each counter has a Key that names
+      the field written to the root span, and an optional list of Conditions
+      that must all match for a span to be counted. Spans are counted when
+      all of the entry's Conditions match. If Conditions is empty, every span
+      in the trace is counted. The counter value is written to the root span
+      under the key specified by `Key`. If no root span exists when the trace
+      is sent, the counter is written to the first non-annotation span instead.
+    fields:
+      - name: Key
+        type: string
+        validations:
+          - type: notempty
+        summary: is the field name written to the root span with the counter value.
+        description: >
+          The name of the field that will be added to the root span. Must not
+          be empty.
+
+      - name: Conditions
+        type: objectarray
+        summary: is the list of conditions a span must satisfy to be counted.
+        description: >
+          All conditions must match for a span to be counted. If empty, every
+          span in the trace is counted. Uses the same condition format as
+          rules-based sampler conditions.

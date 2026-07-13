@@ -65,21 +65,24 @@ commands:
 
 jobs:
   test:
-    docker:
-      - image: cimg/go:1.25
-      - image: redis:6.2
+    # Use the machine executor so testcontainers-go has a local Docker daemon
+    # to drive — the redis testcontainer needs to be reachable from the test
+    # process via a host port, which the docker executor cannot provide.
+    machine:
+      image: ubuntu-2404:current
     resource_class: xlarge
     steps:
       - checkout
-      - restore_cache:
-          keys:
-            - v1-dockerize-{{ checksum "Makefile" }}
-            - v1-dockerize-
-      - run: make dockerize
-      - save_cache:
-          key: v1-dockerize-{{ checksum "Makefile" }}
-          paths:
-            - dockerize.tar.gz
+      - run:
+          name: Install Go and gotestsum
+          command: |
+            GO_VERSION=1.25.3
+            curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" -o /tmp/go.tar.gz
+            sudo rm -rf /usr/local/go
+            sudo tar -C /usr/local -xzf /tmp/go.tar.gz
+            echo 'export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH' >> "$BASH_ENV"
+            export PATH=/usr/local/go/bin:$HOME/go/bin:$PATH
+            go install gotest.tools/gotestsum@latest
       - restore_cache:
           keys:
             - v3-go-mod-{{ checksum "go.sum" }}

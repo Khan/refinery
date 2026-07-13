@@ -87,10 +87,18 @@ complete:
       type: Gauge
       unit: Dimensionless
       description: number of spans in the peer queue
+    - name: collector_peer_queue_capacity
+      type: Gauge
+      unit: Dimensionless
+      description: configured maximum number of spans in the peer queue
     - name: collector_incoming_queue_length
       type: Gauge
       unit: Dimensionless
       description: number of spans in the incoming queue
+    - name: collector_incoming_queue_capacity
+      type: Gauge
+      unit: Dimensionless
+      description: configured maximum number of spans in the incoming queue
     - name: collector_peer_queue
       type: Histogram
       unit: Dimensionless
@@ -107,6 +115,10 @@ complete:
       type: Gauge
       unit: Bytes
       description: current heap allocation
+    - name: memory_limit
+      type: Gauge
+      unit: Bytes
+      description: configured maximum memory allocation for the collector (derived from MaxAlloc or AvailableMemory * MaxMemoryPercentage)
     - name: span_received
       type: Counter
       unit: Dimensionless
@@ -175,6 +187,10 @@ complete:
       type: Counter
       unit: Dimensionless
       description: number of spans kept due to stress relief
+    - name: events_dropped
+      type: Counter
+      unit: Dimensionless
+      description: number of events dropped
     - name: trace_kept_sample_rate
       type: Histogram
       unit: Dimensionless
@@ -228,6 +244,10 @@ complete:
       unit: Dimensionless
       description: The hash of the current rules configuration
 hasprefix:
+    - name: unique_dynsampler_count
+      type: Gauge
+      unit: Dimensionless
+      description: Number of unique dynsampler-go samplers created
     - name: _num_dropped
       type: Counter
       unit: Dimensionless
@@ -296,6 +316,30 @@ hasprefix:
       type: Histogram
       unit: Microseconds
       description: The time spent per iteration of the stale batch dispatch loop
+    - name: gcs_export_events
+      type: Counter
+      unit: Dimensionless
+      description: number of events written to the GCS export
+    - name: gcs_export_dropped
+      type: Counter
+      unit: Dimensionless
+      description: number of events dropped from the GCS export because the queue was full
+    - name: gcs_export_batches
+      type: Counter
+      unit: Dimensionless
+      description: number of batch objects written to GCS
+    - name: gcs_export_errors
+      type: Counter
+      unit: Dimensionless
+      description: number of errors encountered while writing batches to GCS
+    - name: gcs_export_batch_bytes
+      type: Histogram
+      unit: Bytes
+      description: compressed size of batch objects written to GCS
+    - name: gcs_export_queue_length
+      type: Gauge
+      unit: Dimensionless
+      description: number of events waiting to be batched for the GCS export
     - name: _router_proxied
       type: Counter
       unit: Dimensionless

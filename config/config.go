@@ -122,6 +122,9 @@ type Config interface {
 
 	GetOTelTracingConfig() OTelTracingConfig
 
+	// GetGCSExportConfig returns the config specific to GCSExport
+	GetGCSExportConfig() GCSExportConfig
+
 	GetUseIPV6Identifier() bool
 
 	GetRedisIdentifier() string
@@ -150,6 +153,8 @@ type Config interface {
 	GetAddSpanCountToRoot() bool
 
 	GetAddCountsToRoot() bool
+
+	GetSpanCounters() []SpanCounter
 
 	GetConfigMetadata() []ConfigMetadata
 

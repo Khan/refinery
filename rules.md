@@ -3,7 +3,7 @@
 # Honeycomb Refinery Rules Documentation
 
 This is the documentation for the rules configuration for Honeycomb's Refinery.
-It was automatically generated on 2026-02-25 at 20:49:27 UTC.
+It was automatically generated on 2026-07-07 at 21:27:51 UTC.
 
 ## The Rules file
 
@@ -55,6 +55,7 @@ The remainder of this document describes the samplers that can be used within th
 - [Rules for Rules-based Samplers](#rules-for-rules-based-samplers)
 - [Conditions for the Rules in Rules-based Samplers](#conditions-for-the-rules-in-rules-based-samplers)
 - [Total Throughput Sampler](#total-throughput-sampler)
+- [Custom Span Count Configuration](#custom-span-count-configuration)
 
 ---
 ## Deterministic Sampler
@@ -714,4 +715,31 @@ The number of spans is exact, so if there are normally small variations in trace
 If your traces are consistent lengths and changes in trace length is a useful indicator to view in Honeycomb, then set this field to `true`.
 
 Type: `bool`
+
+---
+## Custom Span Count Configuration
+
+### Name: `SpanCounters`
+
+Defines a single custom span counter.
+Each counter has a Key that names the field written to the root span, and an optional list of Conditions that must all match for a span to be counted.
+Spans are counted when all of the entry's Conditions match.
+If Conditions is empty, every span in the trace is counted.
+The counter value is written to the root span under the key specified by `Key`.
+If no root span exists when the trace is sent, the counter is written to the first non-annotation span instead.
+
+### `Key`
+
+The name of the field that will be added to the root span.
+Must not be empty.
+
+Type: `string`
+
+### `Conditions`
+
+All conditions must match for a span to be counted.
+If empty, every span in the trace is counted.
+Uses the same condition format as rules-based sampler conditions.
+
+Type: `objectarray`
 

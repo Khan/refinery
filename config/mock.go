@@ -36,6 +36,7 @@ type MockConfig struct {
 	GetOpAmpConfigVal                OpAMPConfig
 	GetOTelMetricsConfigVal          OTelMetricsConfig
 	GetOTelTracingConfigVal          OTelTracingConfig
+	GetGCSExportConfigVal            GCSExportConfig
 	IdentifierInterfaceName          string
 	UseIPV6Identifier                bool
 	RedisIdentifier                  string
@@ -52,6 +53,7 @@ type MockConfig struct {
 	AdditionalErrorFields            []string
 	AddSpanCountToRoot               bool
 	AddCountsToRoot                  bool
+	SpanCounters                     []SpanCounter
 	CacheOverrunStrategy             string
 	SampleCache                      SampleCacheConfig
 	StressRelief                     StressReliefConfig
@@ -250,6 +252,13 @@ func (m *MockConfig) GetOTelTracingConfig() OTelTracingConfig {
 	return m.GetOTelTracingConfigVal
 }
 
+func (m *MockConfig) GetGCSExportConfig() GCSExportConfig {
+	m.Mux.RLock()
+	defer m.Mux.RUnlock()
+
+	return m.GetGCSExportConfigVal
+}
+
 // GetSamplerConfigForDestName returns the sampler config for the given dataset/environment.
 // If Samplers map is populated, it will look up the dataset-specific config.
 // Falls back to GetSamplerTypeVal if Samplers is not set (backwards compatible).
@@ -413,6 +422,13 @@ func (f *MockConfig) GetAddCountsToRoot() bool {
 	defer f.Mux.RUnlock()
 
 	return f.AddSpanCountToRoot
+}
+
+func (f *MockConfig) GetSpanCounters() []SpanCounter {
+	f.Mux.RLock()
+	defer f.Mux.RUnlock()
+
+	return f.SpanCounters
 }
 
 func (f *MockConfig) GetSampleCacheConfig() SampleCacheConfig {

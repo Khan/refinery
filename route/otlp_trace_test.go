@@ -505,7 +505,7 @@ func TestOTLPHandler(t *testing.T) {
 		apiKey := "my-api-key"
 
 		// add cached environment lookup
-		router.environmentCache.addItem(apiKey, "local", time.Minute)
+		router.environmentCache.addItem(apiKey, authData{environment: "local"}, time.Minute)
 
 		req := &collectortrace.ExportTraceServiceRequest{
 			ResourceSpans: []*trace.ResourceSpans{{
@@ -633,7 +633,7 @@ func TestOTLPHandler(t *testing.T) {
 		event := events[0]
 		// Note: GRPC clients override the user-agent header with their own value.
 		// This is expected behavior and differs from HTTP where custom user-agents are preserved.
-		assert.Equal(t, "grpc-go/1.78.0", event.Data.MetaRefineryIncomingUserAgent)
+		assert.Equal(t, "grpc-go/1.80.0", event.Data.MetaRefineryIncomingUserAgent)
 	})
 
 	t.Run("spans record incoming user agent - HTTP", func(t *testing.T) {
@@ -920,8 +920,8 @@ func TestOTLPHandler(t *testing.T) {
 			},
 		} {
 			t.Run(fmt.Sprintf("ApiKey %s SendKeyMode %s SendKey %s", tt.apiKey, tt.mode, tt.sendKey), func(t *testing.T) {
-				router.environmentCache.addItem(tt.apiKey, "local", time.Minute)
-				router.environmentCache.addItem(tt.sendKey, "local", time.Minute)
+				router.environmentCache.addItem(tt.apiKey, authData{environment: "local"}, time.Minute)
+				router.environmentCache.addItem(tt.sendKey, authData{environment: "local"}, time.Minute)
 
 				// HTTP
 				request, _ := http.NewRequest("POST", "/v1/traces", bytes.NewReader(body))

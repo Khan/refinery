@@ -3,7 +3,7 @@
 # Honeycomb Refinery Configuration Documentation
 
 This is the documentation for the configuration file for Honeycomb's Refinery.
-It was automatically generated on 2026-02-25 at 20:49:27 UTC.
+It was automatically generated on 2026-07-07 at 21:27:51 UTC.
 
 ## The Config file
 
@@ -48,6 +48,7 @@ The remainder of this document describes the sections within the file and the fi
 - [gRPC Server Parameters](#grpc-server-parameters)
 - [Sample Cache](#sample-cache)
 - [Stress Relief](#stress-relief)
+- [GCS Export](#gcs-export)
 ## General Configuration
 
 `General` contains general configuration options that apply to the entire Refinery process.
@@ -181,16 +182,31 @@ ReceiveKeys is a set of Honeycomb API keys that the proxy will treat specially.
 
 This list only applies to span traffic - other Honeycomb API actions will be proxied through to the upstream API directly without modifying keys.
 
-- Not eligible for live reload.
+- Eligible for live reload.
 - Type: `stringarray`
 - Example: `your-key-goes-here`
+
+### `ReceiveKeyIDs`
+
+ReceiveKeyIDs is a set of Honeycomb Ingest Key IDs that the proxy will treat specially.
+
+When `AcceptOnlyListedKeys` is `true`, traffic using an API key whose Honeycomb ingest key ID matches an entry in this list will be accepted.
+The key ID is the `id` field returned by the Honeycomb `/1/auth` endpoint; it is distinct from the full API key value.
+This allows authorization based on key IDs rather than full key values, which avoids storing secret key material in the configuration file.
+Both `ReceiveKeys` and `ReceiveKeyIDs` may be used simultaneously.
+Note: This feature does not support legacy API keys.
+Only Honeycomb Ingest Keys (which have a key ID) are compatible with this setting.
+
+- Eligible for live reload.
+- Type: `stringarray`
+- Example: `your-key-id-goes-here`
 
 ### `AcceptOnlyListedKeys`
 
 AcceptOnlyListedKeys is a boolean flag that causes events arriving with API keys not in the `ReceiveKeys` list to be rejected.
 
-If `true`, then only traffic using the keys listed in `ReceiveKeys` is accepted.
-Events arriving with API keys not in the `ReceiveKeys` list will be rejected with an HTTP `401` error.
+If `true`, then only traffic using the keys listed in `ReceiveKeys` or whose key ID is listed in `ReceiveKeyIDs` is accepted.
+Events arriving with API keys not in either list will be rejected with an HTTP `401` error.
 If `false`, then all traffic is accepted and `ReceiveKeys` is ignored.
 This setting is applied **before** the `SendKey` and `SendKeyMode` settings.
 
@@ -659,6 +675,22 @@ In rare circumstances, compression costs may outweigh the benefits, in which cas
 - Type: `string`
 - Default: `gzip`
 - Options: `none`, `gzip`
+
+### `AdditionalAttributes`
+
+AdditionalAttributes adds the provided attributes as resource attributes on all OpenTelemetry metrics emitted by Refinery.
+
+This is useful for injecting deployment-specific metadata (such as a cluster ID or environment name) into metrics so they can be filtered or grouped in the metrics backend.
+Both keys and values must be strings.
+When supplying via a environment variable, the value should be a string of comma-separated key-value pairs.
+When supplying via the command line, the value should be a key value pair.
+If multiple key-value pairs are needed, each should be supplied via its own command line flag.
+The key-value pairs must use ':' as the separator.
+
+- Not eligible for live reload.
+- Type: `map`
+- Example: `pipeline.id:'12345',rollout.id:'67890'`
+- Environment variable: `REFINERY_OTEL_METRICS_ADDITIONAL_ATTRIBUTES`
 
 ## OpenTelemetry Tracing
 
@@ -1283,4 +1315,75 @@ This setting helps to prevent oscillations.
 - Eligible for live reload.
 - Type: `duration`
 - Default: `10s`
+
+## GCS Export
+
+`GCSExport` contains configuration for optionally exporting sampled (kept) trace spans to a Google Cloud Storage bucket in addition to sending them to Honeycomb.
+Spans are buffered in memory and written as gzipped JSON Lines objects, batched into time-partitioned paths of the form `KeyPrefix/YYYY/MM/DD/HH/hostname-timestamp.jsonl.gz`.
+Authentication uses Google Application Default Credentials.
+
+### `Enabled`
+
+Enabled controls whether kept trace spans are also exported to a GCS bucket.
+
+If `true`, every span belonging to a trace that Refinery decides to keep is also written to the configured GCS bucket.
+Spans of dropped traces are never exported.
+
+- Not eligible for live reload.
+- Type: `bool`
+
+### `Bucket`
+
+Bucket is the name of the GCS bucket to which sampled traces are exported.
+
+The bucket must already exist and the credentials available via Application Default Credentials must have permission to create objects in it.
+Required when `Enabled` is `true`.
+
+- Not eligible for live reload.
+- Type: `string`
+- Example: `my-trace-archive`
+- Environment variable: `REFINERY_GCS_EXPORT_BUCKET`
+
+### `KeyPrefix`
+
+KeyPrefix is the object name prefix under which exported objects are written.
+
+Object names are formed by appending time-partitioned path elements to this prefix.
+Leave empty to write at the root of the bucket.
+
+- Not eligible for live reload.
+- Type: `string`
+- Example: `refinery/traces`
+
+### `FlushInterval`
+
+FlushInterval is the maximum time a batch of spans is buffered before being written to GCS.
+
+A batch is flushed to GCS when it reaches `MaxBatchSize` or when this interval has elapsed since the batch was started, whichever comes first.
+
+- Not eligible for live reload.
+- Type: `duration`
+- Default: `60s`
+
+### `MaxBatchSize`
+
+MaxBatchSize is the maximum uncompressed size of a batch before it is written to GCS.
+
+When the serialized (uncompressed) size of the current batch exceeds this value, it is compressed and written to GCS immediately.
+The objects stored in GCS are gzip-compressed and thus considerably smaller than this value.
+
+- Not eligible for live reload.
+- Type: `memorysize`
+- Default: `100MB`
+
+### `QueueSize`
+
+QueueSize is the number of spans that can be queued for export before spans are dropped.
+
+Spans are handed to the exporter through a fixed-size queue so that a slow or unavailable GCS never blocks sending traces to Honeycomb.
+If the queue is full, new spans are dropped from the export (they are still sent to Honeycomb) and the `gcs_export_dropped` metric is incremented.
+
+- Not eligible for live reload.
+- Type: `int`
+- Default: `100000`
 

@@ -88,6 +88,7 @@ type InMemCollector struct {
 
 	Transmission     transmit.Transmission  `inject:"upstreamTransmission"`
 	PeerTransmission transmit.Transmission  `inject:"peerTransmission"`
+	GCSExport        transmit.Transmission  `inject:"gcsExport"`
 	PubSub           pubsub.PubSub          `inject:""`
 	Metrics          metrics.Metrics        `inject:"metrics"`
 	SamplerFactory   *sample.SamplerFactory `inject:""`
@@ -113,7 +114,8 @@ type InMemCollector struct {
 
 	hostname string
 
-	memMetricSample []rtmetrics.Sample // Memory monitoring using runtime/metrics
+	memMetricSample    []rtmetrics.Sample // Memory monitoring using runtime/metrics
+	spanCounters []config.SpanCounter
 }
 
 // These are the names of the metrics we use to track the number of events sent to peers through the router.
@@ -128,11 +130,14 @@ var inMemCollectorMetrics = []metrics.Metadata{
 	{Name: "trace_span_count", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "number of spans in a trace"},
 	{Name: "collector_incoming_queue", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "number of spans currently in the incoming queue"},
 	{Name: "collector_peer_queue_length", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "number of spans in the peer queue"},
+	{Name: "collector_peer_queue_capacity", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "configured maximum number of spans in the peer queue"},
 	{Name: "collector_incoming_queue_length", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "number of spans in the incoming queue"},
+	{Name: "collector_incoming_queue_capacity", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "configured maximum number of spans in the incoming queue"},
 	{Name: "collector_peer_queue", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "number of spans currently in the peer queue"},
 	{Name: "collector_cache_size", Type: metrics.Gauge, Unit: metrics.Dimensionless, Description: "number of traces currently stored in the trace cache"},
 	{Name: "collect_cache_entries", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "Total number of traces currently stored in the cache from all workers"},
 	{Name: "memory_heap_allocation", Type: metrics.Gauge, Unit: metrics.Bytes, Description: "current heap allocation"},
+	{Name: "memory_limit", Type: metrics.Gauge, Unit: metrics.Bytes, Description: "configured maximum memory allocation for the collector (derived from MaxAlloc or AvailableMemory * MaxMemoryPercentage)"},
 	{Name: "span_received", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of spans received by the collector"},
 	{Name: "span_processed", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of spans processed by the collector"},
 	{Name: "spans_waiting", Type: metrics.UpDown, Unit: metrics.Dimensionless, Description: "number of spans waiting to be processed by the collector"},
@@ -152,6 +157,7 @@ var inMemCollectorMetrics = []metrics.Metadata{
 
 	{Name: "dropped_from_stress", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of spans dropped due to stress relief"},
 	{Name: "kept_from_stress", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of spans kept due to stress relief"},
+	{Name: "events_dropped", Type: metrics.Counter, Unit: metrics.Dimensionless, Description: "number of events dropped"},
 	{Name: "trace_kept_sample_rate", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "sample rate of kept traces"},
 	{Name: "trace_aggregate_sample_rate", Type: metrics.Histogram, Unit: metrics.Dimensionless, Description: "aggregate sample rate of both kept and dropped traces"},
 	{Name: "collector_collect_loop_duration_ms", Type: metrics.Histogram, Unit: metrics.Milliseconds, Description: "duration of the collect loop, the primary event processing goroutine"},
@@ -171,6 +177,7 @@ func (i *InMemCollector) Start() error {
 	i.Logger.Info().WithField("num_workers", numWorkers).Logf("Starting InMemCollector with %d workers", numWorkers)
 
 	i.StressRelief.UpdateFromConfig()
+	i.initSpanCounters()
 	// Set queue capacity metrics for stress relief calculations
 	i.Metrics.Store(DENOMINATOR_INCOMING_CAP, float64(imcConfig.IncomingQueueSize))
 	i.Metrics.Store(DENOMINATOR_PEER_CAP, float64(imcConfig.PeerQueueSize))
@@ -240,6 +247,7 @@ func (i *InMemCollector) reloadConfigs() {
 	i.SamplerFactory.ClearDynsamplers()
 
 	i.StressRelief.UpdateFromConfig()
+	i.initSpanCounters()
 
 	// Send reload signals to all workers to clear their local samplers
 	// so that the new configuration will be propagated
@@ -340,6 +348,13 @@ func (i *InMemCollector) monitor() {
 		case <-ticker.Chan():
 			// Check worker health and report aggregated status
 			i.Health.Ready(collectorHealthKey, i.isReady())
+
+			// Emit queue capacity limits and memory limit so consumers can compute utilization
+			monitorConfig := i.Config.GetCollectionConfig()
+			i.Metrics.Gauge("collector_incoming_queue_capacity", float64(monitorConfig.IncomingQueueSize))
+			i.Metrics.Gauge("collector_peer_queue_capacity", float64(monitorConfig.PeerQueueSize))
+			maxAlloc := monitorConfig.GetMaxAlloc()
+			i.Metrics.Gauge("memory_limit", float64(maxAlloc))
 
 			// Aggregate metrics
 			totalIncoming := 0
@@ -460,6 +475,7 @@ func (i *InMemCollector) ProcessSpanImmediately(sp *types.Span) (processed bool,
 
 	if !keep {
 		i.Metrics.Increment("dropped_from_stress")
+		i.Metrics.Increment("events_dropped")
 		return true, false
 	}
 
@@ -476,8 +492,18 @@ func (i *InMemCollector) ProcessSpanImmediately(sp *types.Span) (processed bool,
 	i.addAdditionalAttributes(sp)
 	mergeTraceAndSpanSampleRates(sp, rate, i.Config.GetIsDryRun())
 	i.Transmission.EnqueueSpan(sp)
+	i.exportSpan(sp)
 
 	return true, true
+}
+
+// exportSpan sends a kept span to the optional GCS exporter, if one is
+// configured. It must only be called for spans of traces that were actually
+// kept by the sampler (not for dry-run "would have dropped" sends).
+func (i *InMemCollector) exportSpan(sp *types.Span) {
+	if i.GCSExport != nil {
+		i.GCSExport.EnqueueSpan(sp)
+	}
 }
 
 // dealWithSentTrace handles a span that has arrived after the sampling decision
@@ -542,8 +568,10 @@ func (i *InMemCollector) dealWithSentTrace(ctx context.Context, tr cache.TraceSe
 		i.Metrics.Increment(TraceSendLateSpan)
 		i.addAdditionalAttributes(sp)
 		i.Transmission.EnqueueSpan(sp)
+		i.exportSpan(sp)
 		return
 	}
+	i.Metrics.Increment("events_dropped")
 	i.Logger.Debug().WithField("trace_id", sp.TraceID).Logf("Dropping span because of previous decision to drop trace")
 }
 
@@ -600,6 +628,8 @@ func (i *InMemCollector) send(ctx context.Context, trace sendableTrace) {
 	// if we're supposed to drop this trace, and dry run mode is not enabled, then we're done.
 	if !trace.KeepSample && !i.Config.GetIsDryRun() {
 		i.Metrics.Increment("trace_send_dropped")
+		dropCount := int64(trace.DescendantCount())
+		i.Metrics.Count("events_dropped", dropCount)
 		i.Logger.Debug().WithFields(logFields).Logf("Dropping trace because of sampling decision")
 		return
 	}
@@ -691,12 +721,88 @@ func (i *InMemCollector) addAdditionalAttributes(sp *types.Span) {
 	}
 }
 
+// initSpanCounters loads and initializes span counters from the current config.
+// Must be called at startup and on config reload.
+func (i *InMemCollector) initSpanCounters() {
+	counters := i.Config.GetSpanCounters()
+	for j := range counters {
+		if err := counters[j].Init(); err != nil {
+			i.Logger.Error().WithField("error", err).Logf("failed to initialize span counter %q", counters[j].Key)
+		}
+	}
+	i.mutex.Lock()
+	i.spanCounters = counters
+	i.mutex.Unlock()
+}
+
+// findSuitableRootSpan returns the root span of the trace if one is present.
+// If no root span has been identified, it falls back to the non-annotation
+// span (i.e. not a span event or link) with the earliest timestamp, which is
+// the most likely root. Returns nil if no suitable span exists.
+func findSuitableRootSpan(t sendableTrace) *types.Span {
+	if t.RootSpan != nil {
+		return t.RootSpan
+	}
+	var best *types.Span
+	for _, sp := range t.GetSpans() {
+		if sp.AnnotationType() != types.SpanAnnotationTypeSpanEvent &&
+			sp.AnnotationType() != types.SpanAnnotationTypeLink {
+			if best == nil || sp.Timestamp.Before(best.Timestamp) {
+				best = sp
+			}
+		}
+	}
+	return best
+}
+
+// computeCustomCounts computes each counter's value by iterating all spans in the trace
+// and attaches the results to the root span.
+// Returns nil, nil if there are no counters configured or no suitable target span.
+//
+// Stress relief note: this runs inside sendTraces(), the sole consumer of the
+// tracesToSend channel. Work is O(N×M) — N spans × M counters — so large
+// traces with many counters slow the consumer, which deepens the outgoing
+// queue. The stress relief system monitors queue depth as one of its stress
+// inputs, so heavy custom-count configurations can raise the measured stress
+// level and trigger earlier activation of stress relief. Additionally, spans
+// processed via ProcessSpanImmediately (the stress-relief fast path) bypass the
+// trace buffer entirely and never reach sendTraces, so custom counts are not
+// computed or attached to stress-sampled traces.
+func (i *InMemCollector) computeCustomCounts(t sendableTrace) (*types.Span, map[string]int64) {
+	i.mutex.RLock()
+	counters := i.spanCounters
+	i.mutex.RUnlock()
+
+	if len(counters) == 0 {
+		return nil, nil
+	}
+
+	targetSpan := findSuitableRootSpan(t)
+	if targetSpan == nil {
+		return nil, nil
+	}
+
+	var rootData config.SpanData = &targetSpan.Data
+	counts := make(map[string]int64, len(counters))
+	for _, sp := range t.GetSpans() {
+		for _, counter := range counters {
+			if counter.MatchesSpan(&sp.Data, rootData) {
+				counts[counter.Key]++
+			}
+		}
+	}
+
+	return targetSpan, counts
+}
+
 func (i *InMemCollector) sendTraces() {
 	defer i.sendTracesWG.Done()
 
 	for t := range i.tracesToSend {
 		i.Metrics.Histogram("collector_outgoing_queue", float64(len(i.tracesToSend)))
 		_, span := otelutil.StartSpanMulti(context.Background(), i.Tracer, "sendTrace", map[string]interface{}{"num_spans": t.DescendantCount(), "tracesToSend_size": len(i.tracesToSend)})
+
+		customCountTarget, customCounts := i.computeCustomCounts(t)
 
 		for _, sp := range t.GetSpans() {
 
@@ -721,6 +827,13 @@ func (i *InMemCollector) sendTraces() {
 				}
 			}
 
+			// set custom span counts on the target span (root if present, else best fallback)
+			if sp == customCountTarget {
+				for k, v := range customCounts {
+					sp.Data.Set(k, v)
+				}
+			}
+
 			isDryRun := i.Config.GetIsDryRun()
 			if isDryRun {
 				sp.Data.Set(config.DryRunFieldName, t.shouldSend)
@@ -733,6 +846,12 @@ func (i *InMemCollector) sendTraces() {
 
 			sp.APIKey = t.APIKey
 			i.Transmission.EnqueueSpan(sp)
+			// only export spans of traces the sampler actually kept; in dry
+			// run mode, traces that would have been dropped still reach here
+			// with shouldSend=false and are not exported.
+			if t.shouldSend {
+				i.exportSpan(sp)
+			}
 		}
 		span.End()
 	}

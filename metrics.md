@@ -3,7 +3,7 @@
 # Honeycomb Refinery Metrics Documentation
 
 This document contains the description of various metrics used in Refinery.
-It was automatically generated on 2026-02-25 at 20:49:27 UTC.
+It was automatically generated on 2026-07-07 at 21:27:50 UTC.
 
 Note: This document does not include metrics defined in the dynsampler-go dependency, as those metrics are generated dynamically at runtime. As a result, certain metrics may be missing or incomplete in this document, but they will still be available during execution with their full names.
 
@@ -34,11 +34,14 @@ This table includes metrics with fully defined names.
 | trace_span_count | Histogram | Dimensionless | number of spans in a trace |
 | collector_incoming_queue | Histogram | Dimensionless | number of spans currently in the incoming queue |
 | collector_peer_queue_length | Gauge | Dimensionless | number of spans in the peer queue |
+| collector_peer_queue_capacity | Gauge | Dimensionless | configured maximum number of spans in the peer queue |
 | collector_incoming_queue_length | Gauge | Dimensionless | number of spans in the incoming queue |
+| collector_incoming_queue_capacity | Gauge | Dimensionless | configured maximum number of spans in the incoming queue |
 | collector_peer_queue | Histogram | Dimensionless | number of spans currently in the peer queue |
 | collector_cache_size | Gauge | Dimensionless | number of traces currently stored in the trace cache |
 | collect_cache_entries | Histogram | Dimensionless | Total number of traces currently stored in the cache from all workers |
 | memory_heap_allocation | Gauge | Bytes | current heap allocation |
+| memory_limit | Gauge | Bytes | configured maximum memory allocation for the collector (derived from MaxAlloc or AvailableMemory * MaxMemoryPercentage) |
 | span_received | Counter | Dimensionless | number of spans received by the collector |
 | span_processed | Counter | Dimensionless | number of spans processed by the collector |
 | spans_waiting | UpDown | Dimensionless | number of spans waiting to be processed by the collector |
@@ -56,6 +59,7 @@ This table includes metrics with fully defined names.
 | trace_send_late_span | Counter | Dimensionless | number of spans that are sent due to late span arrival |
 | dropped_from_stress | Counter | Dimensionless | number of spans dropped due to stress relief |
 | kept_from_stress | Counter | Dimensionless | number of spans kept due to stress relief |
+| events_dropped | Counter | Dimensionless | number of events dropped |
 | trace_kept_sample_rate | Histogram | Dimensionless | sample rate of kept traces |
 | trace_aggregate_sample_rate | Histogram | Dimensionless | aggregate sample rate of both kept and dropped traces |
 | collector_collect_loop_duration_ms | Histogram | Milliseconds | duration of the collect loop, the primary event processing goroutine |
@@ -77,6 +81,7 @@ Metrics in this table don't contain their expected prefixes. This is because the
 
 | Name | Type | Unit | Description |
 |------|------|------|-------------|
+| unique_dynsampler_count | Gauge | Dimensionless | Number of unique dynsampler-go samplers created |
 | _num_dropped | Counter | Dimensionless | Number of traces dropped by configured sampler |
 | _num_kept | Counter | Dimensionless | Number of traces kept by configured sampler |
 | _sample_rate | Histogram | Dimensionless | Sample rate for traces |
@@ -94,6 +99,12 @@ Metrics in this table don't contain their expected prefixes. This is because the
 | _messages_sent | Counter | Dimensionless | number of messages sent to destination |
 | _response_decode_errors | Counter | Dimensionless | number of errors encountered while decoding responses from destination |
 | _stale_dispatch_time | Histogram | Microseconds | The time spent per iteration of the stale batch dispatch loop |
+| gcs_export_events | Counter | Dimensionless | number of events written to the GCS export |
+| gcs_export_dropped | Counter | Dimensionless | number of events dropped from the GCS export because the queue was full |
+| gcs_export_batches | Counter | Dimensionless | number of batch objects written to GCS |
+| gcs_export_errors | Counter | Dimensionless | number of errors encountered while writing batches to GCS |
+| gcs_export_batch_bytes | Histogram | Bytes | compressed size of batch objects written to GCS |
+| gcs_export_queue_length | Gauge | Dimensionless | number of events waiting to be batched for the GCS export |
 | _router_proxied | Counter | Dimensionless | the number of events proxied to another refinery |
 | _router_event | Counter | Dimensionless | the number of events received |
 | _router_event_bytes | Histogram | Bytes | the number of bytes per event received |

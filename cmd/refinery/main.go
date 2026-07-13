@@ -99,11 +99,9 @@ func main() {
 
 	c, err := config.NewConfig(opts, version)
 	if err != nil {
-		if configErr, isConfigErr := err.(*config.FileConfigError); isConfigErr && configErr.HasErrors() {
-			fmt.Printf("%+v\n", err)
+		fmt.Printf("%+v\n", err)
+		if c == nil {
 			os.Exit(1)
-		} else {
-			fmt.Printf("%+v\n", err)
 		}
 	}
 	if opts.Validate {
@@ -188,6 +186,13 @@ func main() {
 		nil, // No custom headers for peer-to-peer traffic
 	)
 
+	// the GCS exporter is optional; when it's disabled we inject a noop so
+	// that the collector's dependency is always satisfied
+	var gcsExport transmit.Transmission = &transmit.NoopTransmission{}
+	if c.GetGCSExportConfig().Enabled {
+		gcsExport = transmit.NewGCSTransmission()
+	}
+
 	// we need to include all the metrics types so we can inject them in case they're needed
 	// but we only want to instantiate the ones that are enabled with non-null values
 	var promMetrics metrics.MetricsBackend = &metrics.NullMetrics{}
@@ -243,6 +248,7 @@ func main() {
 		{Value: peerTransport, Name: "peerTransport"},
 		{Value: upstreamTransmission, Name: "upstreamTransmission"},
 		{Value: peerTransmission, Name: "peerTransmission"},
+		{Value: gcsExport, Name: "gcsExport"},
 		{Value: shrdr},
 		{Value: collector},
 		{Value: promMetrics, Name: "promMetrics"},
